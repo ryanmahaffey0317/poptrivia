@@ -1,15 +1,18 @@
 services:
   poptrivia:
-    build: .
+    # Absolute paths so this works under Unraid Compose Manager (which runs
+    # the compose file from its own /boot/... project directory, not from
+    # the source tree).
+    build: /mnt/user/appdata/poptrivia
     container_name: poptrivia
     restart: unless-stopped
     ports:
       - "8765:8765"
     env_file:
-      - .env
+      - /mnt/user/appdata/poptrivia/.env
     volumes:
       # poptrivia's own state (SQLite DB, generated tracks, scraper cache)
-      - ./config:/config
+      - /mnt/user/appdata/poptrivia/config:/config
       # Mount the media root at the SAME path inside the container so the
       # file paths Tautulli reports work as-is. Read-only — we never write
       # to media.
