@@ -59,6 +59,18 @@ class Settings(BaseSettings):
             return {part.strip() for part in v.split(",") if part.strip()}
         return v
 
+    @field_validator("tautulli_url", "ollama_url", mode="before")
+    @classmethod
+    def _ensure_protocol(cls, v: object) -> object:
+        """Prepend http:// if a bare host:port was provided.
+
+        Easy footgun that wastes minutes of pipeline time before any LLM
+        call fails with 'missing protocol'. We normalize at load time.
+        """
+        if isinstance(v, str) and v and "://" not in v:
+            return f"http://{v}"
+        return v
+
     @field_validator("log_level")
     @classmethod
     def _upper_log_level(cls, v: str) -> str:
