@@ -13,7 +13,8 @@ services:
     volumes:
       # poptrivia's own state (SQLite DB, generated tracks, scraper cache)
       - /mnt/user/appdata/poptrivia/config:/config
-      # Mount the media root at the SAME path inside the container so the
-      # file paths Tautulli reports work as-is. Read-only — we never write
-      # to media.
-      - /mnt/user/data/media:/mnt/user/data/media:ro
+      # Mount the media root at the SAME path Plex/Tautulli uses so the
+      # file paths in webhook payloads resolve as-is. Plex is in a container
+      # that maps /mnt/user/data/media -> /data, so we do the same.
+      # Read-only — we never write to media.
+      - /mnt/user/data/media:/data:ro

@@ -57,7 +57,9 @@ create an entry with:
 - **Conditions:** *(optional)* `Media Type is movie`. Saves us an entry
   in the logs for every TV play.
 
-Under **Data → Playback Start → JSON Data**, paste:
+Under the **Data tab**, expand **each** of Playback Start, Playback Resume,
+and Playback Stop, and paste the same JSON into each one's **JSON Data**
+field:
 
 ```json
 {
@@ -70,16 +72,24 @@ Under **Data → Playback Start → JSON Data**, paste:
   "tmdb_id": "{themoviedb_id}",
   "plex_guid": "{guid}",
   "file": "{file}",
-  "duration_ms": {duration_ms},
+  "duration_ms": "{duration_ms}",
   "session_key": "{session_key}",
-  "view_offset_ms": {view_offset}
+  "view_offset_ms": "{view_offset}"
 }
 ```
 
-Note that `duration_ms`, `session_key`, and `view_offset_ms` are
-**unquoted** — they need to arrive as numbers. The rest are strings.
+All placeholders are quoted, including the numeric ones. If you leave
+`{duration_ms}` or `{view_offset}` unquoted and the placeholder ever
+substitutes to an empty value, the resulting JSON is invalid and
+Tautulli's webhook agent silently sends `null` as the body. The parser
+coerces string numbers to int, so the safe form costs nothing.
 
-Use the same body for the other triggers; only `{action}` varies.
+> **Path note:** Tautulli reports whatever path **Plex** sees. If Plex
+> runs in a Docker container with a remapped media root (e.g. host
+> `/mnt/user/data/media` → container `/data`), the file field will look
+> like `/data/movies/...`. The poptrivia compose file mounts the host
+> media at the same path Plex uses so those paths resolve. Adjust the
+> volume mount if your Plex sees a different path.
 
 > Tautulli variable names have drifted across versions. If your install
 > doesn't recognize a placeholder above, check the up-to-date list at
