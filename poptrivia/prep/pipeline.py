@@ -76,6 +76,7 @@ async def prepare_movie(
             source_items=source_items,
             llm=llm,
             target_count=settings.target_cards_per_movie,
+            num_ctx=settings.ollama_num_ctx,
         )
         if not facts:
             raise PipelineError("Stage 1 produced 0 facts")
@@ -88,6 +89,7 @@ async def prepare_movie(
             subtitles=subs,
             llm=llm,
             max_cards=settings.max_cards_per_movie,
+            num_ctx=settings.ollama_num_ctx,
         )
         if not cards:
             raise PipelineError("Stage 2 produced 0 placed cards")

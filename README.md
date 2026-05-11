@@ -124,6 +124,41 @@ See `.env.example` for the canonical list. Key fields:
 | `TARGET_CARDS_PER_MOVIE`          | Stage 1 produces ~1.5× this many candidate facts. Default 50. |
 | `MAX_CARDS_PER_MOVIE`             | Hard cap on the final track size. Default 70.        |
 
+## Tuning Ollama for parallel prep
+
+Stage 1 and Stage 2 issue concurrent requests to Ollama (up to 3 in
+flight at once per stage). By default Ollama serializes all requests
+through one model instance, so the concurrency from poptrivia gets
+queued server-side and nothing speeds up.
+
+On your Ollama host, set:
+
+```bash
+# in the ollama systemd unit, or /etc/ollama.conf, or wherever you launch it:
+OLLAMA_NUM_PARALLEL=3
+OLLAMA_KEEP_ALIVE=30m       # keep the model loaded between prep jobs
+```
+
+`OLLAMA_NUM_PARALLEL=3` matches what poptrivia is willing to dispatch
+and turns Stage 1's ~40 s sequential time into ~15–20 s, same for
+Stage 2.
+
+**Context window.** `OLLAMA_NUM_CTX` in `.env` defaults to **12288**.
+That's sized for our largest prompt (a Stage 2 window's system +
+examples + assigned facts + 15 minutes of subtitles ≈ 8k input tokens,
+plus generation headroom). Don't bump it casually — every doubling of
+the context window roughly doubles the K/V cache memory per request,
+which directly reduces how many parallel slots fit in VRAM:
+
+| `num_ctx` | K/V cache (qwen3:32b) | Parallel slots on 32 GB VRAM |
+|---|---|---|
+| 8192 | ~1.5 GB | 4–5 |
+| 12288 (default) | ~2.2 GB | 3–4 |
+| 16384 | ~3 GB | 2–3 |
+| 32768 | ~6 GB | 1–2 |
+
+12288 is the sweet spot for poptrivia's prompts on a 5090.
+
 ## GPU Whisper setup
 
 2160p Remux and 4K UHD rips almost always ship with **image-based**

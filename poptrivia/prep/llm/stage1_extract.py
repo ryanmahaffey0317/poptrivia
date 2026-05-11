@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from pathlib import Path
@@ -73,6 +74,14 @@ def _load_prompts() -> tuple[str, str]:
     return system, examples
 
 
+# Cap on simultaneous in-flight Ollama requests. Higher values only
+# actually parallelize if the Ollama server is configured with
+# OLLAMA_NUM_PARALLEL >= this many; otherwise the requests queue
+# server-side. 3 is a reasonable default — modest GPU memory headroom,
+# noticeable real-world speedup on a tuned server.
+_STAGE1_CONCURRENCY = 3
+
+
 async def extract_facts(
     *,
     movie_title: str,
@@ -80,18 +89,16 @@ async def extract_facts(
     source_items: list[RawSourceItem],
     llm: OllamaClient,
     target_count: int,
+    num_ctx: int | None = None,
 ) -> list[RawFactExtracted]:
     """Run stage 1 extraction over all source material.
 
-    Steps:
-      1. Chunk inputs to ~3000 tokens each, preserving source/section metadata.
-      2. Ask Ollama for facts per chunk.
-      3. Dedupe by normalized fact text.
-      4. Rank by specificity; trim to target_count * 1.5.
+    Chunks run concurrently (up to _STAGE1_CONCURRENCY in flight) since
+    each is independent. Total wall-time goes from sum(per-chunk) to
+    roughly max(per-chunk) * (n_chunks / concurrency).
     """
     system, examples = _load_prompts()
 
-    raw_facts: list[RawFactExtracted] = []
     chunks = list(_iter_chunks(source_items))
     log.info(
         "Stage 1: %d source items -> %d chunks (%s)",
@@ -100,7 +107,11 @@ async def extract_facts(
         movie_title,
     )
 
-    for i, (chunk, source, section) in enumerate(chunks):
+    sem = asyncio.Semaphore(_STAGE1_CONCURRENCY)
+
+    async def _process_chunk(
+        i: int, chunk: str, source: str, section: str
+    ) -> list[RawFactExtracted]:
         user_prompt = _build_user_prompt(
             movie_title=movie_title,
             movie_year=movie_year,
@@ -109,16 +120,21 @@ async def extract_facts(
             source=source,
             section=section,
         )
-        try:
-            result = await llm.generate(
-                user_prompt, system=system, schema=_OUTPUT_SCHEMA, temperature=0.2
-            )
-        except Exception as e:
-            log.warning("Stage 1 chunk %d/%d failed: %s", i + 1, len(chunks), e)
-            continue
-        if not isinstance(result, dict):
-            log.warning("Stage 1 chunk %d returned non-dict: %r", i + 1, result)
-            continue
+        async with sem:
+            try:
+                result = await llm.generate(
+                    user_prompt,
+                    system=system,
+                    schema=_OUTPUT_SCHEMA,
+                    temperature=0.2,
+                    num_ctx=num_ctx,
+                )
+            except Exception as e:
+                log.warning("Stage 1 chunk %d/%d failed: %s", i + 1, len(chunks), e)
+                return []
+            if not isinstance(result, dict):
+                log.warning("Stage 1 chunk %d returned non-dict: %r", i + 1, result)
+                return []
 
         parsed = _parse_facts(result, source)
         log.info(
@@ -129,7 +145,15 @@ async def extract_facts(
             f"/{section}" if section else "",
             len(parsed),
         )
-        raw_facts.extend(parsed)
+        return parsed
+
+    chunk_results = await asyncio.gather(
+        *(
+            _process_chunk(i, chunk, source, section)
+            for i, (chunk, source, section) in enumerate(chunks)
+        )
+    )
+    raw_facts: list[RawFactExtracted] = [f for batch in chunk_results for f in batch]
 
     deduped = _dedupe(raw_facts)
     ranked = _rank_and_trim(deduped, target_count=target_count)

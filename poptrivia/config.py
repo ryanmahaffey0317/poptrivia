@@ -26,6 +26,12 @@ class Settings(BaseSettings):
     ollama_url: str
     ollama_model: str = "qwen3:32b"
     ollama_timeout: int = 600
+    # Context window passed to Ollama per request. Sized to fit our largest
+    # prompt (Stage 2 window: system + examples + facts + 15 min of subs ≈
+    # 8k input + 2k output). Lower than the model's native max keeps K/V
+    # cache small, which speeds inference and leaves VRAM for concurrent
+    # requests when OLLAMA_NUM_PARALLEL > 1.
+    ollama_num_ctx: int = 12288
 
     # Remote Whisper service (e.g. Speaches / faster-whisper-server on a
     # GPU host). Used as the fallback when neither embedded subs nor a

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,6 +17,10 @@ _PROMPTS_DIR = Path(__file__).parent / "prompts"
 
 # 15-minute windows per the brief.
 _WINDOW_MS = 15 * 60 * 1000
+
+# Concurrent Stage 2 windows in flight. Same caveat as Stage 1: only
+# actually parallel if Ollama is run with OLLAMA_NUM_PARALLEL >= this.
+_STAGE2_CONCURRENCY = 3
 
 _OUTPUT_SCHEMA = {
     "type": "object",
@@ -77,6 +82,7 @@ async def align_facts(
     subtitles: list[SubtitleEntry],
     llm: OllamaClient,
     max_cards: int,
+    num_ctx: int | None = None,
 ) -> list[TriviaCard]:
     """Place facts onto a per-window timeline.
 
@@ -105,9 +111,15 @@ async def align_facts(
             len(win_facts),
         )
 
-    all_cards: list[TriviaCard] = []
-    for i, (start_ms, end_ms, window_subs) in enumerate(windows):
-        window_facts = assignment[i]
+    sem = asyncio.Semaphore(_STAGE2_CONCURRENCY)
+
+    async def _process_window(
+        i: int,
+        start_ms: int,
+        end_ms: int,
+        window_subs: list[SubtitleEntry],
+        window_facts: list[RawFactExtracted],
+    ) -> list[TriviaCard]:
         if not window_facts:
             log.info(
                 "Stage 2 window %d/%d (%.1fm-%.1fm): no facts assigned",
@@ -116,11 +128,10 @@ async def align_facts(
                 start_ms / 60_000,
                 end_ms / 60_000,
             )
-            continue
+            return []
 
-        # The fact_index uses fXXX ids spanning ALL facts. The prompt only
-        # sees the assigned subset, but the ids match the global index so
-        # _parse_cards still works against fact_index.
+        # Fact ids span ALL facts. The prompt only sees the assigned subset,
+        # but the ids match the global index so _parse_cards finds them.
         local_block = _format_facts_subset(window_facts, fact_id_by_object, fact_index)
         user_prompt = _build_user_prompt(
             movie_title=movie_title,
@@ -132,16 +143,21 @@ async def align_facts(
             window_end_ms=end_ms,
             subtitles=window_subs,
         )
-        try:
-            result = await llm.generate(
-                user_prompt, system=system, schema=_OUTPUT_SCHEMA, temperature=0.3
-            )
-        except Exception as e:
-            log.warning("Stage 2 window %d/%d failed: %s", i + 1, len(windows), e)
-            continue
-        if not isinstance(result, dict):
-            log.warning("Stage 2 window %d returned non-dict: %r", i + 1, result)
-            continue
+        async with sem:
+            try:
+                result = await llm.generate(
+                    user_prompt,
+                    system=system,
+                    schema=_OUTPUT_SCHEMA,
+                    temperature=0.3,
+                    num_ctx=num_ctx,
+                )
+            except Exception as e:
+                log.warning("Stage 2 window %d/%d failed: %s", i + 1, len(windows), e)
+                return []
+            if not isinstance(result, dict):
+                log.warning("Stage 2 window %d returned non-dict: %r", i + 1, result)
+                return []
 
         cards = _parse_cards(result, fact_index=fact_index)
         log.info(
@@ -153,7 +169,15 @@ async def align_facts(
             len(cards),
             len(window_facts),
         )
-        all_cards.extend(cards)
+        return cards
+
+    window_results = await asyncio.gather(
+        *(
+            _process_window(i, start_ms, end_ms, window_subs, assignment[i])
+            for i, (start_ms, end_ms, window_subs) in enumerate(windows)
+        )
+    )
+    all_cards: list[TriviaCard] = [c for batch in window_results for c in batch]
 
     # Pre-assignment means each fact lands in exactly one window, so the
     # old _dedupe_by_fact step is a no-op now. We still cap+renumber in
