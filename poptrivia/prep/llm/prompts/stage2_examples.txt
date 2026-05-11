@@ -1,0 +1,81 @@
+# Few-shot examples for stage 2 timestamp alignment.
+# Format:
+#   INPUT: <facts + subtitle window>
+#   OUTPUT: <JSON object>
+# ---------------------------------------------------------------------------
+
+INPUT:
+FACTS:
+- id=f001 (production, anchors=["baseball bat", "Wendy", "stairs"]):
+    Stanley Kubrick had Shelley Duvall perform the baseball bat scene 127
+    times — a Guinness record for most retakes of a single scene with
+    spoken dialogue.
+- id=f002 (cultural_impact, anchors=[]):
+    Stephen King, who wrote the source novel, repeatedly described
+    Kubrick's adaptation as "a Cadillac with no engine inside it."
+- id=f003 (production, anchors=["typewriter", "Jack"]):
+    The line "All work and no play makes Jack a dull boy" was typed and
+    photographed in five separate languages so that the gag would land in
+    the film's major release territories.
+
+SUBTITLE WINDOW (78:00 to 92:00):
+[78:12] Wendy: Jack… can you come here for a minute?
+[78:20] Jack: What is it?
+[78:42] Wendy: I want you to look at this.
+[79:01] Jack: What is this?
+[79:35] (long silence)
+[81:18] Wendy: Stay away from me!
+[81:24] Jack: Why?
+[81:30] Wendy: Don't hurt me!
+[81:35] Jack: I'm not gonna hurt you.
+[83:50] Wendy: Stay away from me, please!
+[84:02] (Wendy swings the bat)
+[84:05] Jack: Wendy, darling, light of my life…
+
+OUTPUT:
+{
+  "cards": [
+    {
+      "id": "card_001",
+      "timestamp_ms": 4680000,
+      "text": "Kubrick had Shelley Duvall perform this baseball-bat sequence 127 times — a Guinness record for most retakes of a scene with spoken dialogue.",
+      "category": "production",
+      "interest_level": 5,
+      "source_fact_id": "f001",
+      "anchor_evidence": "Wendy swings the bat at 84:02; firing 6s earlier."
+    },
+    {
+      "id": "card_002",
+      "timestamp_ms": 4779000,
+      "text": "Stephen King, who wrote the source novel, repeatedly called Kubrick's adaptation 'a Cadillac with no engine inside it.'",
+      "category": "cultural_impact",
+      "interest_level": 4,
+      "source_fact_id": "f002",
+      "anchor_evidence": "Long silence ~79:35-81:18 — quiet stretch for an anchor-less fact."
+    }
+  ]
+}
+# Note: f003 was NOT placed — the typewriter doesn't appear in this window.
+# Cards are 99 seconds apart (4779000 - 4680000 = 99s) — within the 90s rule.
+
+# ---------------------------------------------------------------------------
+
+INPUT:
+FACTS:
+- id=f010 (easter_egg, anchors=["Room 237"]):
+    Room 237 is numbered 237 because Kubrick removed an existing real-world
+    Room 217 at the Stanley Hotel out of superstition that guests would
+    avoid that room after the film's release.
+
+SUBTITLE WINDOW (15:00 to 30:00):
+[15:30] Hallorann: How'd you like to live in a hotel?
+[16:02] Danny: Yeah.
+[18:45] Wendy: It's so beautiful.
+[22:10] Stuart: I'm sorry to say this, but there was a tragedy in 1970…
+
+OUTPUT:
+{
+  "cards": []
+}
+# Reason: Room 237 isn't anchored anywhere in this window. The fact should
+# wait for a window that includes the Room 237 sequence.
