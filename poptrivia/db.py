@@ -229,6 +229,26 @@ class Database:
         assert cur.lastrowid is not None
         return cur.lastrowid
 
+    async def reset_stale_running_jobs(self) -> int:
+        """Reset any prep_jobs left in 'running' state to 'pending'.
+
+        On a clean shutdown the worker marks each job succeeded or failed.
+        On a hard kill (container OOM, force-recreate, etc.) the 'running'
+        row is stranded — the worker that was processing it is gone, and
+        the new worker only picks up 'pending'. Run on startup so those
+        jobs get retried automatically instead of needing a manual SQL nudge.
+
+        Returns the number of rows reset.
+        """
+        cur = await self.conn.execute(
+            "UPDATE prep_jobs SET status=?, "
+            "last_error='reset on startup (previous container died mid-job)' "
+            "WHERE status=?",
+            (JobStatus.PENDING.value, JobStatus.RUNNING.value),
+        )
+        await self.conn.commit()
+        return cur.rowcount
+
     async def has_active_job(self, plex_guid: str) -> bool:
         async with self.conn.execute(
             """

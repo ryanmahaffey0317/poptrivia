@@ -52,6 +52,18 @@ class PrepWorker:
 
     async def _run(self) -> None:
         log.info("Prep worker started")
+        # Recover any jobs left in 'running' state from a previous container
+        # that died mid-job (force-recreate, OOM, etc). Those would otherwise
+        # never be retried because next_pending_job() only sees 'pending'.
+        try:
+            reset = await self.db.reset_stale_running_jobs()
+            if reset:
+                log.info(
+                    "Reset %d stale 'running' job(s) to 'pending' on startup",
+                    reset,
+                )
+        except Exception as e:
+            log.warning("Stale-job reset failed (non-fatal): %s", e)
         try:
             while not self._stopped.is_set():
                 try:
