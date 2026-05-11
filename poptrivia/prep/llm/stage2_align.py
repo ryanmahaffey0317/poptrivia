@@ -22,6 +22,22 @@ _WINDOW_MS = 15 * 60 * 1000
 # actually parallel if Ollama is run with OLLAMA_NUM_PARALLEL >= this.
 _STAGE2_CONCURRENCY = 3
 
+# Minimum gap between consecutive cards. The Stage 2 prompt asks for this
+# but the model doesn't always honor it; enforced as a hard post-processing
+# step.
+_MIN_CARD_SPACING_MS = 90_000
+
+# Phrases in the model's anchor_evidence that indicate "I decided to skip
+# this fact but emitted it anyway." Filter those cards out — the model is
+# contradicting its own prompt.
+_SELF_SKIP_MARKERS = (
+    "fact skipped",
+    "skipped as",
+    "skip as",
+    "not in this window",
+    "should be skipped",
+)
+
 _OUTPUT_SCHEMA = {
     "type": "object",
     "properties": {
@@ -179,15 +195,20 @@ async def align_facts(
     )
     all_cards: list[TriviaCard] = [c for batch in window_results for c in batch]
 
-    # Pre-assignment means each fact lands in exactly one window, so the
-    # old _dedupe_by_fact step is a no-op now. We still cap+renumber in
-    # case the model placed multiple cards per fact (shouldn't, but safe).
+    # Post-processing chain. Pre-assignment means each fact lands in
+    # exactly one window so _dedupe_by_fact is a near-no-op, but it's
+    # cheap and defensive against the model emitting duplicates.
     deduped = _dedupe_by_fact(all_cards)
-    capped = _cap_and_renumber(deduped, max_cards=max_cards)
+    filtered = _filter_self_skipped(deduped)
+    spaced = _enforce_min_spacing(filtered)
+    capped = _cap_and_renumber(spaced, max_cards=max_cards)
     log.info(
-        "Stage 2 totals: %d raw -> %d deduped -> %d after cap (max %d)",
+        "Stage 2 totals: %d raw -> %d deduped -> %d filtered -> "
+        "%d spaced -> %d after cap (max %d)",
         len(all_cards),
         len(deduped),
+        len(filtered),
+        len(spaced),
         len(capped),
         max_cards,
     )
@@ -424,6 +445,70 @@ def _parse_cards(
             continue
         out.append(card)
     return out
+
+
+def _filter_self_skipped(cards: list[TriviaCard]) -> list[TriviaCard]:
+    """Drop cards whose anchor_evidence text says the model intended to
+    skip them. The model occasionally emits a card AND writes 'fact
+    skipped' in the evidence — contradiction; we trust the evidence and
+    drop the card."""
+    out: list[TriviaCard] = []
+    for c in cards:
+        evidence = (c.anchor_evidence or "").lower()
+        if any(marker in evidence for marker in _SELF_SKIP_MARKERS):
+            log.info(
+                "Dropping self-skipped card (fact %s, evidence: %r)",
+                c.source_fact_id,
+                c.anchor_evidence,
+            )
+            continue
+        out.append(c)
+    return out
+
+
+def _enforce_min_spacing(cards: list[TriviaCard]) -> list[TriviaCard]:
+    """Walk cards in timestamp order; when two land within
+    _MIN_CARD_SPACING_MS of each other, keep the higher-interest one.
+
+    The Stage 2 prompt asks the model to respect 90s spacing but in
+    practice it does not always — particularly across windows where the
+    last card of window N and the first card of window N+1 don't know
+    about each other."""
+    if not cards:
+        return cards
+    ordered = sorted(cards, key=lambda c: c.timestamp_ms)
+    kept: list[TriviaCard] = [ordered[0]]
+    for card in ordered[1:]:
+        prev = kept[-1]
+        if card.timestamp_ms - prev.timestamp_ms < _MIN_CARD_SPACING_MS:
+            # Collision. Keep the higher-interest card; on ties keep the
+            # earlier one already in `kept`.
+            if card.interest_level > prev.interest_level:
+                log.info(
+                    "Card collision at %d ms vs %d ms — replacing fact %s "
+                    "(interest %d) with %s (interest %d)",
+                    prev.timestamp_ms,
+                    card.timestamp_ms,
+                    prev.source_fact_id,
+                    prev.interest_level,
+                    card.source_fact_id,
+                    card.interest_level,
+                )
+                kept[-1] = card
+            else:
+                log.info(
+                    "Card collision at %d ms vs %d ms — dropping fact %s "
+                    "(interest %d) in favor of %s (interest %d)",
+                    prev.timestamp_ms,
+                    card.timestamp_ms,
+                    card.source_fact_id,
+                    card.interest_level,
+                    prev.source_fact_id,
+                    prev.interest_level,
+                )
+            continue
+        kept.append(card)
+    return kept
 
 
 def _dedupe_by_fact(cards: list[TriviaCard]) -> list[TriviaCard]:

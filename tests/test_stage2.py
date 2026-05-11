@@ -8,6 +8,8 @@ from poptrivia.prep.llm.stage2_align import (
     _build_fact_index,
     _cap_and_renumber,
     _dedupe_by_fact,
+    _enforce_min_spacing,
+    _filter_self_skipped,
     _format_ts,
     _split_subtitle_windows,
     write_track_file,
@@ -202,6 +204,75 @@ def test_assign_facts_anchorless_high_specificity_distributed_first() -> None:
 
 def test_assign_facts_handles_empty_windows_list() -> None:
     assert _assign_facts_to_windows([_raw_fact("x")], []) == []
+
+
+# ─── post-processing: self-skip filter ──────────────────────────────
+
+
+def _card_with_evidence(text: str, ts: int = 1000, interest: int = 3) -> TriviaCard:
+    return TriviaCard(
+        id="c",
+        timestamp_ms=ts,
+        text="x",
+        category="production",
+        interest_level=interest,
+        source_fact_id="f1",
+        anchor_evidence=text,
+    )
+
+
+def test_filter_self_skipped_drops_marked_cards() -> None:
+    cards = [
+        _card_with_evidence("Good evidence: scene match at 12:30."),
+        _card_with_evidence("Annie's gate scene not in this window; fact skipped."),
+        _card_with_evidence("fact skipped as it refers to a scene not in this window"),
+        _card_with_evidence("Quiet stretch ~22:00 — anchor-less production fact."),
+    ]
+    out = _filter_self_skipped(cards)
+    assert len(out) == 2
+    assert all("skip" not in (c.anchor_evidence or "").lower() for c in out)
+
+
+def test_filter_self_skipped_empty_evidence_passes() -> None:
+    cards = [_card_with_evidence("")]
+    assert _filter_self_skipped(cards) == cards
+
+
+# ─── post-processing: min-spacing enforcement ───────────────────────
+
+
+def test_enforce_min_spacing_drops_lower_interest_collision() -> None:
+    cards = [
+        _card("a", 1_000_000, interest=2),
+        _card("b", 1_020_000, interest=5),   # 20s after a — collision, b wins
+        _card("c", 2_000_000, interest=3),   # 980s later, far enough
+    ]
+    out = _enforce_min_spacing(cards)
+    assert [c.id for c in out] == ["b", "c"]
+
+
+def test_enforce_min_spacing_keeps_widely_spaced_cards() -> None:
+    cards = [
+        _card("a", 0, interest=4),
+        _card("b", 100_000, interest=4),  # 100s after — fine
+        _card("c", 200_000, interest=4),
+    ]
+    assert _enforce_min_spacing(cards) == cards
+
+
+def test_enforce_min_spacing_resolves_chain_correctly() -> None:
+    """Three cards in a 30s window: keep highest interest only."""
+    cards = [
+        _card("a", 0, interest=1),
+        _card("b", 10_000, interest=5),   # 10s after a
+        _card("c", 20_000, interest=3),   # 10s after b
+    ]
+    out = _enforce_min_spacing(cards)
+    assert len(out) == 1 and out[0].id == "b"
+
+
+def test_enforce_min_spacing_empty_input() -> None:
+    assert _enforce_min_spacing([]) == []
 
 
 def test_write_track_file_roundtrip(tmp_path: Path) -> None:
