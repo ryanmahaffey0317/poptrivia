@@ -57,20 +57,26 @@ _AUDIO_EXTRACT_TIMEOUT_SECONDS = 600  # ~10 min ceiling for audio rip
 async def extract(
     file_path: Path,
     *,
+    plex_guid: str | None = None,
+    plex_url: str = "",
+    plex_token: str = "",
     whisper_url: str = "",
     whisper_model: str = "Systran/faster-whisper-large-v3",
     whisper_timeout: int = 3600,
 ) -> list[SubtitleEntry]:
     """Get subtitles for a movie file.
 
-    Strategy in order:
-      1. ffprobe the file. Skip image-based subtitle streams (PGS/VOBSUB)
-         and try only text streams via ffmpeg.
-      2. Sidecar .srt next to the file.
-      3. Remote Whisper (if `whisper_url` is set) — extracts low-bitrate
-         audio and POSTs it to an OpenAI-compatible /v1/audio/transcriptions
-         endpoint.
-      4. Hard error.
+    Strategy in order (each step that succeeds short-circuits the rest):
+      1. ffprobe + ffmpeg on embedded TEXT subtitle streams. Skips
+         image-based streams (PGS/VOBSUB/DVB) so we don't burn 60s
+         timeouts on streams ffmpeg can't decode to SRT.
+      2. Sidecar `.srt` next to the file.
+      3. Plex's auto-downloaded subtitle stream (if PLEX_URL +
+         PLEX_TOKEN + plex_guid are all set). Catches the common case
+         where Plex's OpenSubtitles agent downloaded an SRT but stored
+         it in Plex's metadata directory rather than as a sidecar.
+      4. Remote Whisper (if WHISPER_URL is set).
+      5. Hard error with a clear message.
     """
     if not file_path.exists():
         raise SubtitleExtractError(f"Media file not found: {file_path}")
@@ -85,10 +91,18 @@ async def extract(
         log.info("Subtitles via sidecar SRT (%d entries)", len(sidecar))
         return sidecar
 
+    if plex_url and plex_token and plex_guid:
+        from_plex = await _try_plex_subtitles(
+            plex_guid=plex_guid, plex_url=plex_url, plex_token=plex_token
+        )
+        if from_plex:
+            log.info("Subtitles via Plex API (%d entries)", len(from_plex))
+            return from_plex
+
     if whisper_url:
         log.warning(
-            "No text subs in %s — falling back to remote Whisper at %s",
-            file_path.name,
+            "No text subs found locally or via Plex — falling back to "
+            "remote Whisper at %s",
             whisper_url,
         )
         return await _try_remote_whisper(
@@ -99,10 +113,59 @@ async def extract(
         )
 
     raise SubtitleExtractError(
-        f"No text subs in {file_path.name} and WHISPER_URL is not set. "
-        "Either drop a sidecar .srt next to the file or configure a remote "
-        "Whisper service in .env."
+        f"No text subs available for {file_path.name}. Tried embedded "
+        "streams, sidecar SRT, Plex API, and Whisper — all unavailable "
+        "or not configured. Either enable Plex's auto-subtitle download "
+        "for this library, or configure WHISPER_URL in .env."
     )
+
+
+async def _try_plex_subtitles(
+    *, plex_guid: str, plex_url: str, plex_token: str
+) -> list[SubtitleEntry] | None:
+    """Ask Plex if it has a text subtitle stream for this movie.
+
+    Catches the Plex OpenSubtitles agent's auto-downloads regardless of
+    whether they live as sidecar files or in Plex's metadata dir.
+    """
+    # Local import: keeps the heavy plex_client out of the import graph
+    # for users who don't have PLEX_URL set.
+    from poptrivia.plex_client import PlexClient, PlexError, _TEXT_CODECS
+
+    client = PlexClient(plex_url, plex_token)
+    try:
+        streams = await client.find_subtitle_streams(plex_guid)
+        text_streams = [s for s in streams if s.codec in _TEXT_CODECS]
+        if not text_streams:
+            log.info("Plex reports 0 text subtitle streams for %s", plex_guid)
+            return None
+        log.info(
+            "Plex has %d text subtitle stream(s) for %s; trying highest-ranked",
+            len(text_streams),
+            plex_guid,
+        )
+        for stream in text_streams:
+            try:
+                srt_text = await client.download_subtitle(stream.stream_id)
+            except PlexError as e:
+                log.warning("Plex stream %d download failed: %s", stream.stream_id, e)
+                continue
+            entries = _parse_srt_text(srt_text)
+            if entries:
+                log.info(
+                    "Plex stream %d (%s, lang=%s) yielded %d entries",
+                    stream.stream_id,
+                    stream.codec,
+                    stream.language,
+                    len(entries),
+                )
+                return entries
+        return None
+    except Exception as e:
+        log.warning("Plex subtitle lookup failed: %s", e)
+        return None
+    finally:
+        await client.aclose()
 
 
 # ─── ffmpeg (text-stream extraction) ──────────────────────────────────────

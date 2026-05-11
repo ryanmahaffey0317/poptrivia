@@ -4,10 +4,14 @@ import asyncio
 import logging
 import re
 from pathlib import Path
-from typing import Any
 
-import cloudscraper
 from bs4 import BeautifulSoup
+from playwright.async_api import (
+    Browser,
+    Playwright,
+    TimeoutError as PlaywrightTimeoutError,
+    async_playwright,
+)
 
 from poptrivia.models import RawSourceItem
 from poptrivia.prep.sources._cache import cache_path, read_text, write_text
@@ -16,31 +20,26 @@ log = logging.getLogger("poptrivia.prep.imdb")
 
 _BASE = "https://www.imdb.com"
 
-# A full browser fingerprint that pairs with cloudscraper's JS-challenge
-# handling. cloudscraper inherits these and adds its own challenge cookies
-# during the first GET.
-_HEADERS: dict[str, str] = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-    ),
-    "Accept": (
-        "text/html,application/xhtml+xml,application/xml;q=0.9,"
-        "image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7"
-    ),
-    "Accept-Language": "en-US,en;q=0.9",
-    "Sec-Ch-Ua": '"Chromium";v="131", "Not_A Brand";v="24", "Google Chrome";v="131"',
-    "Sec-Ch-Ua-Mobile": "?0",
-    "Sec-Ch-Ua-Platform": '"Windows"',
-    "Sec-Fetch-Dest": "document",
-    "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "same-origin",
-    "Sec-Fetch-User": "?1",
-    "Upgrade-Insecure-Requests": "1",
-}
+# Realistic UA + locale to pair with Chromium. IMDB sits behind Cloudflare;
+# a real headless browser passes the JS challenge that cloudscraper couldn't.
+_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
 
-_RETRY_DELAYS_SECONDS = (3, 8, 15)
-_REQUEST_TIMEOUT_SECONDS = 30
+# Minimal "stealth" — strips the headless flags Cloudflare looks for. Runs
+# before every page load on a context.
+_STEALTH_INIT_SCRIPT = """
+Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+Object.defineProperty(navigator, 'plugins', {
+    get: () => [1, 2, 3, 4, 5],
+});
+window.chrome = { runtime: {} };
+"""
+
+_NAV_TIMEOUT_MS = 30_000
+_POST_LOAD_SETTLE_MS = 2_000  # Let Cloudflare's JS check resolve.
 
 
 class IMDBScrapeError(RuntimeError):
@@ -71,93 +70,103 @@ async def _fetch_html(imdb_id: str, section: str, cache_dir: Path) -> str:
 
     url = f"{_BASE}/title/{imdb_id}/{section}/"
     referer = f"{_BASE}/title/{imdb_id}/"
-    log.info("Fetching IMDB %s for %s (cloudscraper)", section, imdb_id)
+    log.info("Fetching IMDB %s for %s (playwright/chromium)", section, imdb_id)
 
-    # cloudscraper is synchronous; run the whole session on a worker thread
-    # so the event loop stays free.
-    last_status, html = await asyncio.to_thread(
-        _scrape_with_retries, url=url, referer=referer
-    )
-
+    html = await _scrape_via_playwright(url=url, referer=referer)
     if html is None:
         raise IMDBScrapeError(
-            f"IMDB {section} for {imdb_id}: HTTP {last_status} after retries. "
-            "If this persists, fall back to manual sourcing with "
-            "`scripts/prep_movie.py --sources-file PATH` "
-            "(paste the IMDB trivia/goofs text into a .txt file)."
+            f"IMDB {section} for {imdb_id}: Playwright could not retrieve "
+            "page content (Cloudflare challenge unresolved or timeout)."
         )
 
     write_text(path, html)
     return html
 
 
-def _scrape_with_retries(*, url: str, referer: str) -> tuple[int | None, str | None]:
-    """Synchronous scrape with cookie warmup + retry on 202.
-
-    Returns (last_status, html_or_None). Only retries on 202; any other
-    failure short-circuits.
+async def _scrape_via_playwright(*, url: str, referer: str) -> str | None:
+    """Open a headless Chromium, warm the session via the title page,
+    then fetch the trivia/goofs page. Returns rendered HTML or None.
     """
-    headers: dict[str, str] = {**_HEADERS, "Referer": referer}
-    scraper = cloudscraper.create_scraper(
-        browser={"browser": "chrome", "platform": "windows", "mobile": False}
-    )
-    scraper.headers.update(headers)
-
-    # Cookie warmup — hit the title page so Cloudflare sees a "first-party"
-    # session before we ask for trivia/goofs. Non-fatal.
-    try:
-        scraper.get(referer, timeout=_REQUEST_TIMEOUT_SECONDS)
-    except Exception as e:
-        log.debug("IMDB referer warmup failed (non-fatal): %s", e)
-
-    last_status: int | None = None
-    for attempt, delay in enumerate((0,) + _RETRY_DELAYS_SECONDS):
-        if delay:
-            log.info(
-                "IMDB %s returned %s — retrying in %ds (attempt %d/%d)",
-                url,
-                last_status,
-                delay,
-                attempt,
-                len(_RETRY_DELAYS_SECONDS),
-            )
-            _sleep(delay)
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(
+            headless=True,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+            ],
+        )
         try:
-            r = scraper.get(url, timeout=_REQUEST_TIMEOUT_SECONDS)
-        except Exception as e:
-            log.warning("IMDB request raised %s: %s", type(e).__name__, e)
-            last_status = None
-            break
-        last_status = r.status_code
-        if r.status_code == 200 and r.text:
-            return last_status, r.text
-        # Any non-202 failure is unlikely to fix itself with a retry.
-        if r.status_code != 202:
-            break
-
-    return last_status, None
+            return await _scrape_with_browser(browser, url=url, referer=referer)
+        finally:
+            await browser.close()
 
 
-def _sleep(seconds: int) -> None:
-    """Blocking sleep (we're inside asyncio.to_thread)."""
-    import time
+async def _scrape_with_browser(
+    browser: Browser, *, url: str, referer: str
+) -> str | None:
+    context = await browser.new_context(
+        user_agent=_USER_AGENT,
+        locale="en-US",
+        viewport={"width": 1280, "height": 720},
+        java_script_enabled=True,
+    )
+    await context.add_init_script(_STEALTH_INIT_SCRIPT)
+    try:
+        page = await context.new_page()
 
-    time.sleep(seconds)
+        # 1. Cookie warmup via the title page.
+        try:
+            await page.goto(
+                referer, wait_until="domcontentloaded", timeout=_NAV_TIMEOUT_MS
+            )
+            await page.wait_for_timeout(_POST_LOAD_SETTLE_MS)
+        except PlaywrightTimeoutError as e:
+            log.debug("IMDB referer warmup timed out: %s", e)
+
+        # 2. The actual target.
+        try:
+            await page.goto(
+                url, wait_until="domcontentloaded", timeout=_NAV_TIMEOUT_MS
+            )
+        except PlaywrightTimeoutError as e:
+            log.warning("IMDB navigation timed out for %s: %s", url, e)
+            return None
+        # Let Cloudflare's JS check resolve.
+        await page.wait_for_timeout(_POST_LOAD_SETTLE_MS)
+
+        # If we landed on a Cloudflare challenge page, the content will be
+        # very short and have no trivia/goofs markup. Heuristic check:
+        html = await page.content()
+        if _looks_like_challenge(html):
+            log.warning("Playwright landed on a Cloudflare challenge page for %s", url)
+            # Give it one more beat in case the JS challenge is still solving.
+            await page.wait_for_timeout(5_000)
+            html = await page.content()
+            if _looks_like_challenge(html):
+                return None
+
+        return html
+    finally:
+        await context.close()
+
+
+def _looks_like_challenge(html: str) -> bool:
+    # Cloudflare's interstitials all share these markers.
+    return (
+        "Just a moment" in html
+        or "Checking your browser" in html
+        or "cf-browser-verification" in html
+    )
+
+
+# ─── parsing (unchanged) ──────────────────────────────────────────────────
 
 
 def _parse_items(html: str, source: str) -> list[RawSourceItem]:
-    """Parse IMDB's trivia/goofs list out of the page.
-
-    IMDB's HTML is volatile across redesigns. We try the modern list-item
-    structure first, then fall back to old-style `.sodatext` divs. If both
-    fail we return nothing rather than crash; the prep pipeline can still
-    proceed with the remaining sources.
-    """
     soup = BeautifulSoup(html, "html.parser")
 
     candidates: list[str] = []
 
-    # Modern layout: each item lives in an <li class="ipc-metadata-list__item">
     for li in soup.select("li.ipc-metadata-list__item"):
         inner = li.select_one("div.ipc-html-content-inner-div")
         if inner is None:
@@ -166,14 +175,12 @@ def _parse_items(html: str, source: str) -> list[RawSourceItem]:
         if text:
             candidates.append(text)
 
-    # Old layout: <div class="sodatext"> per item.
     if not candidates:
         for div in soup.select("div.sodatext"):
             text = _clean(div.get_text(" ", strip=True))
             if text:
                 candidates.append(text)
 
-    # Last-resort: any element with data-testid containing 'item-id'.
     if not candidates:
         for el in soup.select('[data-testid^="item-id"]'):
             text = _clean(el.get_text(" ", strip=True))

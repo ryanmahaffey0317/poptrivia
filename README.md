@@ -330,30 +330,53 @@ docker compose exec poptrivia sqlite3 /config/poptrivia.db \
 
 ### "IMDB returns HTTP 202 (Cloudflare blocked)"
 
-poptrivia uses `cloudscraper` to handle Cloudflare's stealth checks
-when scraping IMDB trivia and goofs. If the challenge math evolves
-faster than the library and we start seeing persistent 202 retries in
-the logs, fall back to the **manual paste workflow**:
+poptrivia uses Playwright (headless Chromium) to scrape IMDB. Playwright
+executes Cloudflare's JS challenges in a real browser environment, which
+defeats the stealth-block under almost all conditions.
 
-1. Open the movie's IMDB trivia page in your normal browser
-   (`https://www.imdb.com/title/<imdb-id>/trivia/`).
-2. Select all the trivia text shown on the page (cmd+A then copy, or
-   click-drag through every item).
-3. Paste into a plain `.txt` file at
-   `/mnt/user/appdata/poptrivia/config/manual_sources/<movie>_trivia.txt`.
-   Do the same for the goofs page if relevant.
-4. Run prep with `--sources-file`:
+If you still see persistent failures in the logs:
 
+1. Run the container with extra Playwright debugging:
+   ```bash
+   docker exec poptrivia python -c "
+   from playwright.async_api import async_playwright; import asyncio
+   async def t():
+       async with async_playwright() as p:
+           b = await p.chromium.launch(); page = await (await b.new_context()).new_page()
+           await page.goto('https://www.imdb.com/title/tt0081505/trivia/')
+           print(await page.title())
+           await b.close()
+   asyncio.run(t())
+   "
+   ```
+   If the title prints as "Just a moment..." or similar, Cloudflare is
+   blocking even the real browser — usually means your container's
+   outbound IP is on a watchlist.
+
+2. As a last resort: the manual `--sources-file` workflow still exists.
+   Open IMDB in your normal browser, copy trivia text into a `.txt`
+   file, and run:
    ```bash
    docker exec poptrivia python scripts/prep_movie.py \
        --guid plex://movie/<id> \
-       --sources-file /config/manual_sources/<movie>_trivia.txt \
-       --sources-file /config/manual_sources/<movie>_goofs.txt
+       --sources-file /config/manual_sources/<movie>_trivia.txt
    ```
 
-When `--sources-file` is supplied the IMDB *network* scrape is skipped
-entirely; the file contents are fed to Stage 1 as if they came from
-IMDB. Wikipedia and TMDB still run normally.
+### "Subtitle extraction fails on 2160p Remux"
+
+Most Remux files ship with image-based PGS subtitles only. Three options:
+
+1. **Plex auto-downloaded subs** (preferred). In Plex: Library →
+   Settings → Subtitles → enable "Find subtitles automatically." Plex
+   downloads SRTs from OpenSubtitles and exposes them via its API.
+   poptrivia fetches them automatically as long as `PLEX_URL` +
+   `PLEX_TOKEN` are configured in `.env`.
+
+2. **Sidecar SRT**: drop a `.srt`, `.en.srt`, or `.eng.srt` file next to
+   the `.mkv`. poptrivia finds it directly.
+
+3. **Remote Whisper** transcription service (last resort, slowest). See
+   "GPU Whisper setup" above.
 
 ### "Ollama unreachable"
 
