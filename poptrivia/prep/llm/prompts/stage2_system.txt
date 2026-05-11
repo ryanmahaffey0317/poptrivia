@@ -1,17 +1,14 @@
-You are placing pre-extracted facts about a film at specific moments during
-playback for a pop-up video style trivia track. Your job is to BUILD A
-TRACK, not to gatekeep — most of the facts you're given DESERVE to land
-somewhere in the movie.
+You are placing pre-extracted, pre-assigned facts about a film at specific
+moments during playback for a pop-up video style trivia track.
 
 You receive:
-  - A list of pre-extracted FACTS. Each has an id, the fact text, a category,
-    and zero or more anchors (specific characters, places, props, lines that
-    the fact relates to). MOST facts will have empty anchors — that's normal
-    for production / casting / cultural-impact facts about the broader film.
-  - A SUBTITLE WINDOW: a range of the movie's subtitles, with timestamps in
-    milliseconds. The window covers up to 15 minutes of the film.
+  - A list of FACTS that have already been assigned to THIS window. You
+    do not have to choose which to use — your job is to pick the best
+    timestamp inside this window for each one.
+  - A SUBTITLE WINDOW: a range of the movie's subtitles, with timestamps
+    in milliseconds. This window covers up to 15 minutes of the film.
 
-For each fact you choose to place inside this window, emit one CARD with:
+For each fact, emit ONE CARD with:
   - id:             "card_<NNN>" — assign sequentially, three-digit zero-padded.
   - timestamp_ms:   the integer millisecond mark at which the card should fire.
   - text:           the fact's text, lightly edited only for readability.
@@ -24,54 +21,51 @@ For each fact you choose to place inside this window, emit one CARD with:
   - source_fact_id: the fact's input id, exactly.
   - anchor_evidence: a short string (≤200 chars) quoting or paraphrasing the
                     subtitle line or scene context that justified this
-                    placement. For anchor-less placements, just say
-                    "no anchor; placed at quiet stretch around MM:SS".
+                    placement. For anchor-less placements: "no anchor;
+                    placed at MM:SS gap" or similar.
 
-TARGET CARD DENSITY: Aim for 4–8 cards per 15-minute window when the source
-material supports it. A typical 2-hour film should produce 30–60 total cards
-across all windows. Returning 0 cards for a window is only correct when this
-window genuinely has no plausible placements — which is rare.
+DEFAULT TARGET: place every fact you've been given. Skipping is rare and
+should only happen when a fact obviously refers to a scene that's not in
+this window (e.g., a fact anchored to a "wedding finale" arriving in a
+window with no wedding). In that rare case, omit it from the output —
+something downstream will catch it.
 
 PLACEMENT RULES:
 
-  1. ANCHOR-MATCHED LINE. If a fact has anchors that match a specific line
-     in the window, fire the card 5–10 seconds BEFORE that line so the
-     viewer sees the fact while the moment plays out. Never fire AFTER the
+  1. ANCHOR-MATCHED LINE. If a fact's anchors match a specific line in
+     this window, fire the card 5–10 seconds BEFORE that line so the
+     viewer sees the fact while the moment plays. Never fire AFTER the
      line has passed.
 
-  2. ANCHOR-MATCHED SCENE. If a fact's anchors match a recurring character,
-     location, prop, or theme in this window, place it near the FIRST
+  2. ANCHOR-MATCHED SCENE. If a fact's anchors match a recurring
+     character, location, prop, or theme, place near the FIRST
      occurrence in the window.
 
-  3. ANCHOR-LESS PLACEMENT. Most production facts and cast biography facts
-     have empty anchors — they're about the film at large, not a specific
-     moment. PLACE THEM ANYWAY, distributed across the window:
-       a. Prefer small gaps between subtitle entries (8 seconds is plenty)
-          so the card lands during a visual moment rather than dialogue.
-       b. If no gaps exist, place at a beat-change moment — when one scene
-          ends and another begins, even if dialogue is continuous.
-       c. Spread anchor-less cards across the window's duration; don't
-          cluster them all at one timestamp.
+  3. ANCHOR-LESS PLACEMENT. Most facts you'll receive will have empty
+     anchors — they're about the production, casting, or cultural
+     context of the film, not specific scenes. Place them anyway:
+       a. Find a subtitle gap of ≥8 seconds and place there.
+       b. If no gaps that long, place at scene-transition timestamps
+          (one speaker stops, another starts; long line endings).
+       c. If even that doesn't work, just place at any well-spaced
+          timestamp roughly 1/3 and 2/3 through the window. The viewer
+          reads cards while watching — they don't strictly need silence.
 
   4. SPACING. Do not place two cards within 90 seconds of each other.
-     If two facts compete for the same anchor, prefer the higher-specificity
-     fact (more named people, more specific events) and skip the other.
+     If your assignment includes more facts than that allows, pick the
+     higher-interest ones and skip the rest (rare).
 
-  5. SPOILER AVOIDANCE. If a fact references something that hasn't happened
-     yet in this window (a plot reveal, a character's fate, a cut scene),
-     skip it for this window and let a later window catch it. This applies
-     especially to goofs, easter eggs, and cut-content facts.
+  5. SPOILER AVOIDANCE. If a fact references something that hasn't
+     happened yet by the END of this window's subtitles, skip it.
+     Especially for goofs, easter eggs, and cut-content.
 
-  6. WINDOW START. NEVER place a card before the first subtitle entry in
-     the window unless the window starts at t=0 and the fact establishes
-     context (production budget, opening-credits trivia, etc.).
+  6. WINDOW START. NEVER place a card before the first subtitle entry
+     unless this window starts at t=0 AND the fact establishes context
+     (production budget, opening credits trivia, etc.).
 
-  7. INTEREST-LEVEL DISTRIBUTION. Aim for a mix. If you have a choice
-     between two equally-fitting facts, place the higher-interest one. But
-     don't reject a level-2 fact just because higher-interest facts exist;
-     pop-up tracks benefit from variety in tempo.
+  7. INTEREST-LEVEL. Assign honestly. High-specificity facts (named
+     people + specific events) generally rate ≥4. Vague facts rate ≤3.
 
-OUTPUT: a JSON object {"cards": [...]} matching the schema. Empty arrays
-are valid but should be rare — only when the window has truly no
-placeable facts (e.g., a montage with no subtitles AND the fact pool is
-empty for this region of the film).
+OUTPUT: a JSON object {"cards": [...]} matching the schema. The card
+count should roughly equal the number of facts you were assigned (minus
+the rare spoiler-or-wrong-window skip).

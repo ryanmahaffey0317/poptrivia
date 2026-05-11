@@ -1,14 +1,13 @@
-# Few-shot examples for stage 2 timestamp alignment.
-# Format:
-#   INPUT: <facts + subtitle window>
-#   OUTPUT: <JSON object>
+# Few-shot examples for stage 2 timestamp placement.
+# These illustrate the *placement* task. Fact selection has already been
+# done in pre-processing — you receive only the facts assigned to this
+# window and your job is to choose timestamps.
 # ---------------------------------------------------------------------------
 
-# EXAMPLE 1 — strong anchor matches in the subtitle window.
-# Shows what to do when facts have specific scene anchors.
+# EXAMPLE 1 — facts with strong scene anchors.
 
 INPUT:
-FACTS:
+FACTS ASSIGNED TO THIS WINDOW:
 - id=f001 (production, anchors=["baseball bat", "Wendy", "stairs"]):
     Stanley Kubrick had Shelley Duvall perform the baseball bat scene 127
     times — a Guinness record for most retakes of a single scene with
@@ -16,10 +15,6 @@ FACTS:
 - id=f002 (cultural_impact, anchors=[]):
     Stephen King, who wrote the source novel, repeatedly described
     Kubrick's adaptation as "a Cadillac with no engine inside it."
-- id=f003 (production, anchors=["typewriter", "Jack"]):
-    The line "All work and no play makes Jack a dull boy" was typed and
-    photographed in five separate languages so the gag would land in
-    the film's major release territories.
 
 SUBTITLE WINDOW (78:00 to 92:00):
 [78:12] Wendy: Jack… can you come here for a minute?
@@ -30,7 +25,6 @@ SUBTITLE WINDOW (78:00 to 92:00):
 [81:18] Wendy: Stay away from me!
 [81:24] Jack: Why?
 [81:30] Wendy: Don't hurt me!
-[81:35] Jack: I'm not gonna hurt you.
 [83:50] Wendy: Stay away from me, please!
 [84:02] (Wendy swings the bat)
 [84:05] Jack: Wendy, darling, light of my life…
@@ -40,36 +34,33 @@ OUTPUT:
   "cards": [
     {
       "id": "card_001",
+      "timestamp_ms": 4779000,
+      "text": "Stephen King, who wrote the source novel, repeatedly called Kubrick's adaptation 'a Cadillac with no engine inside it.'",
+      "category": "cultural_impact",
+      "interest_level": 4,
+      "source_fact_id": "f002",
+      "anchor_evidence": "Long silence ~79:35-81:18 — anchor-less cultural fact placed in this gap."
+    },
+    {
+      "id": "card_002",
       "timestamp_ms": 4680000,
       "text": "Kubrick had Shelley Duvall perform this baseball-bat sequence 127 times — a Guinness record for most retakes of a scene with spoken dialogue.",
       "category": "production",
       "interest_level": 5,
       "source_fact_id": "f001",
       "anchor_evidence": "Wendy swings the bat at 84:02; firing 6s earlier."
-    },
-    {
-      "id": "card_002",
-      "timestamp_ms": 4779000,
-      "text": "Stephen King, who wrote the source novel, repeatedly called Kubrick's adaptation 'a Cadillac with no engine inside it.'",
-      "category": "cultural_impact",
-      "interest_level": 4,
-      "source_fact_id": "f002",
-      "anchor_evidence": "Quiet stretch 79:35-81:18 — fits an anchor-less cultural-impact fact."
     }
   ]
 }
-# Note: f003 (typewriter fact) was not placed — typewriter doesn't appear
-# in this window. Wait for a later window with that anchor.
+# Both facts placed. Anchor-less King quote landed in the 79:35-81:18 quiet
+# stretch. Anchored bat-scene fact fired 6s before its visual moment.
 
 # ---------------------------------------------------------------------------
 
-# EXAMPLE 2 — mostly anchor-less production facts (the COMMON case).
-# This is what happens for most films: IMDB trivia is about the making of
-# the film, not specific scenes. Distribute these across the window at any
-# convenient gap or beat-change. Don't gatekeep.
+# EXAMPLE 2 — all anchor-less. The common case for production / casting.
 
 INPUT:
-FACTS:
+FACTS ASSIGNED TO THIS WINDOW:
 - id=f010 (production, anchors=[]):
     Kristen Wiig and Annie Mumolo workshopped the screenplay for over six
     years before selling it to Universal.
@@ -79,13 +70,6 @@ FACTS:
 - id=f012 (cultural_impact, anchors=[]):
     On release, the film became the highest-grossing R-rated comedy
     directed at the time by a female-led writing team.
-- id=f013 (casting, anchors=[]):
-    Melissa McCarthy's audition for Megan reportedly lasted twenty minutes
-    of improvised material — Apatow has said he was crying with laughter
-    by the end.
-- id=f014 (score_music, anchors=["Wilson Phillips"]):
-    Wilson Phillips performed "Hold On" live for the wedding finale — the
-    group's first major film appearance in over a decade.
 
 SUBTITLE WINDOW (0:00 to 15:00):
 [00:42] Ted: That was amazing.
@@ -95,12 +79,10 @@ SUBTITLE WINDOW (0:00 to 15:00):
 [03:50] Lillian: I have something I need to tell you.
 [04:12] Annie: What is it?
 [06:01] Lillian: I'm engaged.
-[06:08] Annie: Oh my god!
 [07:30] (beat — coffee scene)
 [09:20] Annie: So who's the best man?
 [11:45] (Annie at the bakery — montage)
 [13:02] Annie: I think we need to start over.
-[14:30] (scene transition)
 
 OUTPUT:
 {
@@ -112,61 +94,47 @@ OUTPUT:
       "category": "production",
       "interest_level": 5,
       "source_fact_id": "f010",
-      "anchor_evidence": "Quiet stretch ~1:30, opening scene establishing — good moment for a 'how this film got made' card."
+      "anchor_evidence": "Quiet stretch ~1:30 — anchor-less production origin fact."
     },
     {
       "id": "card_002",
-      "timestamp_ms": 240000,
+      "timestamp_ms": 450000,
       "text": "Judd Apatow personally pursued Wiig to write and star after seeing her improvise at the Upright Citizens Brigade.",
       "category": "casting",
       "interest_level": 4,
       "source_fact_id": "f011",
-      "anchor_evidence": "Gap before Lillian's announcement at 3:50 — no scene anchor needed for casting backstory."
+      "anchor_evidence": "Beat between Lillian's engagement reveal and the coffee scene at ~7:30 — anchor-less casting backstory."
     },
     {
       "id": "card_003",
-      "timestamp_ms": 445000,
-      "text": "Melissa McCarthy's audition reportedly lasted twenty minutes of improvised material; Apatow has said he was crying with laughter by the end.",
-      "category": "casting",
-      "interest_level": 4,
-      "source_fact_id": "f013",
-      "anchor_evidence": "Beat between Lillian's 'I'm engaged' reaction and the coffee scene — anchor-less casting fact fits the post-reveal pause."
-    },
-    {
-      "id": "card_004",
-      "timestamp_ms": 700000,
+      "timestamp_ms": 720000,
       "text": "On release the film became the highest-grossing R-rated comedy ever directed at the time by a female-led writing team.",
       "category": "cultural_impact",
       "interest_level": 4,
       "source_fact_id": "f012",
-      "anchor_evidence": "Beat-change around 7:30 (coffee scene start) — anchor-less cultural-impact fact."
+      "anchor_evidence": "Beat-change ~12:00 (montage end / Annie's reset) — anchor-less cultural-impact fact placed in the late third of the window."
     }
   ]
 }
-# Note: f014 (Wilson Phillips) was held back — its anchor doesn't appear
-# in this window. It belongs in whatever window contains the wedding finale.
-# Four cards placed across 15 minutes, spaced ~3-5 minutes apart, all but
-# the typewriter fact relying on anchor-less placement at natural gaps.
+# All three facts placed, ~5 minutes apart, each at a natural lull. No
+# facts skipped — the assignment said these three belong here, the model
+# placed all three.
 
 # ---------------------------------------------------------------------------
 
-# EXAMPLE 3 — fact whose anchor is in a FUTURE window.
-# Don't place a fact in this window if its anchor lives elsewhere.
+# EXAMPLE 3 — assignment includes a wrong-window fact. Skip is rare but valid.
 
 INPUT:
-FACTS:
-- id=f020 (easter_egg, anchors=["Room 237"]):
-    Room 237 is numbered 237 because Kubrick removed an existing real-world
-    Room 217 at the Stanley Hotel out of superstition that guests would
-    avoid that room after the film's release.
-- id=f021 (production, anchors=[]):
-    Filming took place at EMI Elstree Studios over the course of fifty
-    weeks — at the time a Guinness record for the longest production
-    schedule on a single film.
+FACTS ASSIGNED TO THIS WINDOW:
+- id=f020 (production, anchors=[]):
+    Filming took place at EMI Elstree Studios over fifty weeks — a
+    Guinness record at the time for longest single-film production.
+- id=f021 (easter_egg, anchors=["wedding finale", "Wilson Phillips"]):
+    Wilson Phillips appears as themselves performing "Hold On" during
+    the wedding-finale set piece.
 
 SUBTITLE WINDOW (15:00 to 30:00):
 [15:30] Hallorann: How'd you like to live in a hotel?
-[16:02] Danny: Yeah.
 [18:45] Wendy: It's so beautiful.
 [22:10] Stuart: I'm sorry to say this, but there was a tragedy in 1970…
 [27:40] (long silence — exterior establishing shot)
@@ -177,15 +145,16 @@ OUTPUT:
     {
       "id": "card_001",
       "timestamp_ms": 1670000,
-      "text": "Filming took place at EMI Elstree Studios over the course of fifty weeks — at the time a Guinness record for the longest production schedule on a single film.",
+      "text": "Filming took place at EMI Elstree Studios over fifty weeks — a Guinness record at the time for longest single-film production.",
       "category": "production",
       "interest_level": 4,
-      "source_fact_id": "f021",
-      "anchor_evidence": "Long establishing-shot silence ~27:40 — anchor-less production fact, well-spaced from the start of the window."
+      "source_fact_id": "f020",
+      "anchor_evidence": "Long establishing-shot silence ~27:40 — anchor-less production fact."
     }
   ]
 }
-# Note: f020 (Room 237) was NOT placed — Room 237 isn't anchored in this
-# window. Save it for the window that actually contains the Room 237 scene.
-# But we DID place the anchor-less production fact — empty output would be
-# wrong here when there's a perfectly good place for it.
+# f021 (Wilson Phillips wedding finale) was skipped. Its anchors explicitly
+# name "wedding finale" which is the END of the film, not minute 15-30.
+# Skip is valid — but only when the fact obviously refers to a scene that
+# isn't in this window. Anchor-less production / casting facts should be
+# placed even when their assignment seems arbitrary.

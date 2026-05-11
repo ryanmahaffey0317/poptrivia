@@ -4,6 +4,7 @@ from pathlib import Path
 
 from poptrivia.models import RawFactExtracted, TriviaCard
 from poptrivia.prep.llm.stage2_align import (
+    _assign_facts_to_windows,
     _build_fact_index,
     _cap_and_renumber,
     _dedupe_by_fact,
@@ -97,6 +98,95 @@ def test_format_ts() -> None:
     assert _format_ts(0) == "00:00"
     assert _format_ts(90_500) == "01:30"
     assert _format_ts(3_600_000) == "60:00"
+
+
+def _raw_fact(
+    text: str,
+    *,
+    anchors: list[str] | None = None,
+    specificity: str = "high",
+    category: str = "production",
+) -> RawFactExtracted:
+    return RawFactExtracted(
+        fact=text,
+        source="imdb_trivia",
+        specificity=specificity,  # type: ignore[arg-type]
+        anchors=anchors or [],
+        category=category,  # type: ignore[arg-type]
+    )
+
+
+def test_assign_facts_anchor_match_goes_to_first_matching_window() -> None:
+    """A fact whose anchor appears in the subtitles is assigned to that
+    window — even if a later one also matches."""
+    facts = [
+        _raw_fact("Bat scene took 127 takes.", anchors=["baseball bat"]),
+    ]
+    windows = [
+        (0, 900_000, [SubtitleEntry(0, 5000, "Hello")]),
+        (900_000, 1_800_000, [SubtitleEntry(0, 5000, "She picks up the baseball bat.")]),
+        (1_800_000, 2_700_000, [SubtitleEntry(0, 5000, "The baseball bat again.")]),
+    ]
+    assigned = _assign_facts_to_windows(facts, windows)
+    assert assigned[0] == []
+    assert len(assigned[1]) == 1
+    assert assigned[2] == []  # placed in first match only
+
+
+def test_assign_facts_anchorless_round_robin_distributes_across_windows() -> None:
+    """Anchor-less facts must spread across all windows."""
+    facts = [
+        _raw_fact(f"Fact {i}", anchors=[], specificity="medium")
+        for i in range(9)
+    ]
+    windows = [
+        (i * 900_000, (i + 1) * 900_000, [SubtitleEntry(0, 1, "dialogue")])
+        for i in range(3)
+    ]
+    assigned = _assign_facts_to_windows(facts, windows)
+    counts = [len(w) for w in assigned]
+    # 9 facts / 3 windows -> exactly 3 each
+    assert counts == [3, 3, 3]
+
+
+def test_assign_facts_unmatched_anchor_falls_through_to_round_robin() -> None:
+    """A fact with anchors that don't appear anywhere should still be placed."""
+    facts = [
+        _raw_fact("Wedding fact", anchors=["nonexistent wedding"]),
+    ]
+    windows = [
+        (0, 900_000, [SubtitleEntry(0, 1, "morning coffee")]),
+        (900_000, 1_800_000, [SubtitleEntry(0, 1, "office scene")]),
+    ]
+    assigned = _assign_facts_to_windows(facts, windows)
+    # Round-robin starts at index 0 for the leftover.
+    assert sum(len(w) for w in assigned) == 1
+    assert len(assigned[0]) == 1
+
+
+def test_assign_facts_anchorless_high_specificity_distributed_first() -> None:
+    """High-specificity anchor-less facts spread across windows before
+    low-specificity ones fill remaining slots."""
+    facts = [
+        _raw_fact("Low 1", specificity="low"),
+        _raw_fact("Low 2", specificity="low"),
+        _raw_fact("High A", specificity="high"),
+        _raw_fact("High B", specificity="high"),
+    ]
+    windows = [
+        (0, 900_000, [SubtitleEntry(0, 1, "x")]),
+        (900_000, 1_800_000, [SubtitleEntry(0, 1, "y")]),
+    ]
+    assigned = _assign_facts_to_windows(facts, windows)
+    # First slot per window goes to high-specificity (sorted first).
+    assert assigned[0][0].fact == "High A"
+    assert assigned[1][0].fact == "High B"
+    assert assigned[0][1].fact == "Low 1"
+    assert assigned[1][1].fact == "Low 2"
+
+
+def test_assign_facts_handles_empty_windows_list() -> None:
+    assert _assign_facts_to_windows([_raw_fact("x")], []) == []
 
 
 def test_write_track_file_roundtrip(tmp_path: Path) -> None:

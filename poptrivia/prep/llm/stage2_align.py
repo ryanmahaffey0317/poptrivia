@@ -78,21 +78,55 @@ async def align_facts(
     llm: OllamaClient,
     max_cards: int,
 ) -> list[TriviaCard]:
-    """Run stage 2 over 15-minute subtitle windows and merge results."""
+    """Place facts onto a per-window timeline.
+
+    Architecture: we pre-assign each fact to exactly one window in Python
+    (anchored facts to the first window where their anchor appears, anchor-
+    less facts round-robin), then ask the LLM only to choose the precise
+    *timestamp* within that window. The model is good at "when within these
+    15 minutes" but bad at "which of the 9 windows" — taking the global
+    coordination problem out of its hands fixes the distribution issue we
+    saw on Bridesmaids (9 cards clustered in 30-53 min, rest of the movie
+    empty).
+    """
     system, examples = _load_prompts()
     fact_index = _build_fact_index(facts)
-    fact_block = _format_facts(facts)
+    fact_id_by_object = {id(f): fid for fid, f in fact_index.items()}
 
     windows = _split_subtitle_windows(subtitles, movie_duration_ms)
     log.info("Stage 2: %d facts across %d windows", len(facts), len(windows))
 
+    assignment = _assign_facts_to_windows(facts, windows)
+    for i, win_facts in enumerate(assignment):
+        log.info(
+            "Stage 2 window %d/%d: %d fact(s) pre-assigned",
+            i + 1,
+            len(windows),
+            len(win_facts),
+        )
+
     all_cards: list[TriviaCard] = []
     for i, (start_ms, end_ms, window_subs) in enumerate(windows):
+        window_facts = assignment[i]
+        if not window_facts:
+            log.info(
+                "Stage 2 window %d/%d (%.1fm-%.1fm): no facts assigned",
+                i + 1,
+                len(windows),
+                start_ms / 60_000,
+                end_ms / 60_000,
+            )
+            continue
+
+        # The fact_index uses fXXX ids spanning ALL facts. The prompt only
+        # sees the assigned subset, but the ids match the global index so
+        # _parse_cards still works against fact_index.
+        local_block = _format_facts_subset(window_facts, fact_id_by_object, fact_index)
         user_prompt = _build_user_prompt(
             movie_title=movie_title,
             movie_year=movie_year,
             examples=examples,
-            facts_block=fact_block,
+            facts_block=local_block,
             window_index=i,
             window_start_ms=start_ms,
             window_end_ms=end_ms,
@@ -111,25 +145,105 @@ async def align_facts(
 
         cards = _parse_cards(result, fact_index=fact_index)
         log.info(
-            "Stage 2 window %d/%d (%.1fm-%.1fm): %d cards",
+            "Stage 2 window %d/%d (%.1fm-%.1fm): %d/%d placed",
             i + 1,
             len(windows),
             start_ms / 60_000,
             end_ms / 60_000,
             len(cards),
+            len(window_facts),
         )
         all_cards.extend(cards)
 
-    merged = _dedupe_by_fact(all_cards)
-    capped = _cap_and_renumber(merged, max_cards=max_cards)
+    # Pre-assignment means each fact lands in exactly one window, so the
+    # old _dedupe_by_fact step is a no-op now. We still cap+renumber in
+    # case the model placed multiple cards per fact (shouldn't, but safe).
+    deduped = _dedupe_by_fact(all_cards)
+    capped = _cap_and_renumber(deduped, max_cards=max_cards)
     log.info(
         "Stage 2 totals: %d raw -> %d deduped -> %d after cap (max %d)",
         len(all_cards),
-        len(merged),
+        len(deduped),
         len(capped),
         max_cards,
     )
     return capped
+
+
+# ─── fact -> window assignment ────────────────────────────────────────────
+
+
+def _assign_facts_to_windows(
+    facts: list[RawFactExtracted],
+    windows: list[tuple[int, int, list[SubtitleEntry]]],
+) -> list[list[RawFactExtracted]]:
+    """Decide which window each fact belongs to.
+
+    - Anchored facts: scan windows in order, place in the first window
+      whose subtitles contain any anchor token (case-insensitive).
+    - Anchor-less facts (and anchored facts that didn't match anywhere):
+      distribute round-robin starting from window 0, ranked by
+      specificity descending so high-quality facts spread first.
+
+    The model still gets to choose the precise timestamp within its
+    assigned window.
+    """
+    if not windows:
+        return []
+    n_windows = len(windows)
+    assignment: list[list[RawFactExtracted]] = [[] for _ in range(n_windows)]
+
+    # Pre-lowercase each window's subtitle text once.
+    window_blobs = [
+        " ".join(s.text for s in subs).lower() for (_a, _b, subs) in windows
+    ]
+
+    leftover: list[RawFactExtracted] = []
+    for fact in facts:
+        anchors = [a for a in fact.anchors if a and a.strip()]
+        if not anchors:
+            leftover.append(fact)
+            continue
+        placed = False
+        for idx, blob in enumerate(window_blobs):
+            if any(a.lower() in blob for a in anchors):
+                assignment[idx].append(fact)
+                placed = True
+                break
+        if not placed:
+            leftover.append(fact)
+
+    # Round-robin distribute leftover (anchor-less / unmatched) facts.
+    # Sort by specificity desc so the strong stuff is spread across the
+    # whole timeline rather than clustered at the front.
+    leftover.sort(key=lambda f: -_SPECIFICITY_RANK.get(f.specificity, 0))
+    for i, fact in enumerate(leftover):
+        assignment[i % n_windows].append(fact)
+
+    return assignment
+
+
+_SPECIFICITY_RANK = {"high": 3, "medium": 2, "low": 1}
+
+
+def _format_facts_subset(
+    window_facts: list[RawFactExtracted],
+    fact_id_by_object: dict[int, str],
+    fact_index: dict[str, RawFactExtracted],
+) -> str:
+    """Render just the facts assigned to one window, preserving their
+    globally-assigned fXXX ids so _parse_cards finds them in fact_index."""
+    lines: list[str] = []
+    for fact in window_facts:
+        fid = fact_id_by_object.get(id(fact))
+        if fid is None:
+            # Fallback — shouldn't happen, but degrade gracefully.
+            continue
+        anchors = ", ".join(fact.anchors) if fact.anchors else "(no anchors)"
+        lines.append(
+            f"- id={fid} ({fact.category}, anchors=[{anchors}]):\n    {fact.fact}"
+        )
+    return "\n".join(lines)
 
 
 def write_track_file(
