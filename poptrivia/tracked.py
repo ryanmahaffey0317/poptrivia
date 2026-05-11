@@ -70,3 +70,37 @@ def is_tracked(
     if plex_guid and plex_guid.lower() in tracked:
         return True
     return False
+
+
+def append_to_tracked(
+    path: Path,
+    identifier: str,
+    *,
+    comment: str | None = None,
+) -> None:
+    """Atomically append a new identifier line to the tracked-list file.
+
+    Used by the Discord bot when a user approves "Generate trivia for this."
+    Writes through a tempfile + rename so a partial write during a poller
+    read can't corrupt the file. Idempotent — if the identifier is already
+    present, this is a no-op.
+    """
+    identifier = identifier.strip()
+    if not identifier:
+        raise ValueError("identifier cannot be empty")
+
+    existing = read_tracked(path) if path.exists() else set()
+    if identifier.lower() in existing:
+        log.info("Tracked list already contains %s; no-op", identifier)
+        return
+
+    body = path.read_text(encoding="utf-8") if path.exists() else _TEMPLATE
+    if body and not body.endswith("\n"):
+        body += "\n"
+    suffix = f"   # {comment}" if comment else ""
+    body += f"{identifier}{suffix}\n"
+
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(body, encoding="utf-8")
+    tmp.replace(path)
+    log.info("Appended %s to tracked list", identifier)

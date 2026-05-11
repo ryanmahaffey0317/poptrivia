@@ -45,6 +45,15 @@ class Settings(BaseSettings):
     discord_webhook_url: str
     discord_system_webhook_url: str = ""
 
+    # Discord bot (interactive opt-in for untracked plays). Optional —
+    # leave DISCORD_BOT_TOKEN blank to disable the bot entirely; the
+    # curated-list behavior still works.
+    discord_bot_token: str = ""
+    discord_bot_channel_id: int = 0
+    discord_approved_users: Annotated[set[int], NoDecode] = Field(default_factory=set)
+    discord_prompt_enabled: bool = True
+    discord_prompt_delay_seconds: int = 300
+
     # Source material
     tmdb_api_key: str = ""
 
@@ -75,6 +84,22 @@ class Settings(BaseSettings):
     def _split_users(cls, v: object) -> object:
         if isinstance(v, str):
             return {part.strip() for part in v.split(",") if part.strip()}
+        return v
+
+    @field_validator("discord_approved_users", mode="before")
+    @classmethod
+    def _split_user_ids(cls, v: object) -> object:
+        if isinstance(v, str):
+            out: set[int] = set()
+            for part in v.split(","):
+                part = part.strip()
+                if not part:
+                    continue
+                try:
+                    out.add(int(part))
+                except ValueError:
+                    continue
+            return out
         return v
 
     @field_validator("tautulli_url", "ollama_url", "whisper_url", mode="before")

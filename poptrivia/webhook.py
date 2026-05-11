@@ -85,13 +85,22 @@ async def tautulli_webhook(request: Request) -> dict[str, Any]:
     if not is_tracked(
         tracked=tracked, imdb_id=event.imdb_id, plex_guid=event.plex_guid
     ):
+        # Captured the metadata; consider scheduling a Discord opt-in
+        # prompt so the user can add it to the list from the couch.
+        prompted = await _maybe_schedule_prompt(request, event, movie)
         log.info(
-            "Movie %r (%s) is not in the tracked list — captured metadata "
-            "but doing nothing else",
+            "Movie %r (%s) is not in the tracked list — captured metadata; "
+            "prompt scheduled: %s",
             event.title,
             event.imdb_id or event.plex_guid,
+            prompted,
         )
-        return {"ok": True, "action": "metadata_captured", "tracked": False}
+        return {
+            "ok": True,
+            "action": "metadata_captured",
+            "tracked": False,
+            "prompt_scheduled": prompted,
+        }
 
     # ─── tracked: handle by event type + status ─────────────────────
     if event.event.lower() not in _START_EVENTS:
@@ -185,4 +194,36 @@ async def _start_monitor_if_needed(
         session_key,
         movie.title,
         len(track),
+    )
+
+
+async def _maybe_schedule_prompt(
+    request: Request, event: TautulliEvent, movie: Movie
+) -> bool:
+    """Schedule a delayed Discord prompt for an untracked monitored play.
+
+    Returns True if a new timer was created (False if disabled, dismissed,
+    a timer already exists, or this isn't a start event).
+    """
+    settings = request.app.state.settings
+    if not settings.discord_prompt_enabled:
+        return False
+    if not settings.discord_bot_token:
+        return False  # bot disabled at config level
+    if event.event.lower() not in _START_EVENTS:
+        return False
+    if movie.dismissed_at is not None:
+        return False
+
+    bot = getattr(request.app.state, "bot", None)
+    registry = getattr(request.app.state, "prompt_timers", None)
+    if bot is None or registry is None:
+        return False
+
+    return registry.schedule(
+        session_key=event.session_key,
+        plex_guid=event.plex_guid,
+        settings=settings,
+        db=request.app.state.db,
+        bot=bot,
     )

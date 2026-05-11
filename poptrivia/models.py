@@ -119,6 +119,7 @@ class Movie(BaseModel):
     status: MovieStatus = MovieStatus.NOT_STARTED
     track_path: str | None = None
     error_message: str | None = None
+    dismissed_at: datetime | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
 

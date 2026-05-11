@@ -256,6 +256,53 @@ docker compose exec poptrivia python scripts/test_discord.py
 Sends a sample trivia card and a system message. Useful after first
 configuration to confirm the webhook URLs are correct.
 
+## Interactive Discord opt-in (optional)
+
+You can manage the tracked list without SSH by enabling the Discord bot.
+When a monitored user plays an **untracked** movie, after a configurable
+delay (default 5 min) the bot posts:
+
+```
+📽️ Now playing: Bridesmaids (2011)
+This movie isn't on your trivia list. Want me to generate a track for
+next time?
+[✨ Generate]  [❌ No thanks]
+```
+
+Click **✨ Generate** (from an approved Discord user) and poptrivia:
+1. Appends the IMDB id to `tracked.txt`
+2. Queues a prep job immediately (no waiting for the 30-min poll)
+3. Edits the message to "✅ Queued — I'll let you know when it's ready"
+
+Click **❌ No thanks** and the movie is marked dismissed — no future
+prompts for it. Re-enable by manually adding to `tracked.txt`.
+
+There's also a `/track <imdb_id>` slash command for keyboard-driven adds
+without playback.
+
+### One-time Discord developer-portal setup
+
+1. https://discord.com/developers/applications → **New Application**.
+2. **Bot tab → Reset Token**, save it as `DISCORD_BOT_TOKEN`. Enable:
+   - ☑ Server Members Intent
+   - ☑ Message Content Intent
+3. **OAuth2 → URL Generator**. Scopes: `bot`, `applications.commands`.
+   Bot Permissions: Send Messages, Embed Links, Read Message History.
+   Open the generated URL → authorize for your server.
+4. In Discord (with Developer Mode on):
+   - Right-click your avatar → Copy User ID → `DISCORD_APPROVED_USERS`
+   - Right-click the prompt channel → Copy Channel ID →
+     `DISCORD_BOT_CHANNEL_ID`
+5. Set those three vars (plus the bot token) in `.env`, recreate the
+   container. The bot logs "Bot connected as poptrivia#NNNN" on startup.
+
+### Disabling
+
+Leave `DISCORD_BOT_TOKEN` blank — the bot won't start, and the curated
+list still works exactly the same. Set `DISCORD_PROMPT_ENABLED=false` to
+keep the bot running (for `/track`) but stop the playback-triggered
+prompts.
+
 ## The tracked list
 
 `/config/tracked.txt` is the single source of truth for what gets prepped

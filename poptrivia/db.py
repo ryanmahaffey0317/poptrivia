@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS movies (
     status        TEXT NOT NULL,
     track_path    TEXT,
     error_message TEXT,
+    dismissed_at  TIMESTAMP,
     created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -48,6 +49,7 @@ CREATE INDEX IF NOT EXISTS idx_prep_jobs_status ON prep_jobs(status, id);
 # Idempotent migrations for installs that predate a column.
 _MIGRATIONS = [
     "ALTER TABLE prep_jobs ADD COLUMN manual_sources TEXT",
+    "ALTER TABLE movies ADD COLUMN dismissed_at TIMESTAMP",
 ]
 
 
@@ -200,6 +202,15 @@ class Database:
         )
         await self.conn.commit()
 
+    async def set_dismissed(self, plex_guid: str) -> None:
+        """Mark a movie as 'do not prompt again' (Discord ❌ No thanks)."""
+        await self.conn.execute(
+            "UPDATE movies SET dismissed_at=CURRENT_TIMESTAMP, "
+            "updated_at=CURRENT_TIMESTAMP WHERE plex_guid=?",
+            (plex_guid,),
+        )
+        await self.conn.commit()
+
     # ─── prep_jobs ──────────────────────────────────────────────────
 
     async def enqueue_job(
@@ -288,6 +299,12 @@ class Database:
 
 
 def _row_to_movie(row: aiosqlite.Row) -> Movie:
+    # dismissed_at may not exist on the row if a v1-era DB hasn't been
+    # migrated yet (e.g. read happens during the migration race window).
+    try:
+        dismissed = _parse_ts(row["dismissed_at"])
+    except (KeyError, IndexError):
+        dismissed = None
     return Movie(
         plex_guid=row["plex_guid"],
         imdb_id=row["imdb_id"],
@@ -298,6 +315,7 @@ def _row_to_movie(row: aiosqlite.Row) -> Movie:
         status=MovieStatus(row["status"]),
         track_path=row["track_path"],
         error_message=row["error_message"],
+        dismissed_at=dismissed,
         created_at=_parse_ts(row["created_at"]),
         updated_at=_parse_ts(row["updated_at"]),
     )
