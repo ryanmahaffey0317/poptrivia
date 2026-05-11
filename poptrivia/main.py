@@ -7,6 +7,7 @@ from fastapi import FastAPI
 
 from poptrivia.config import get_settings
 from poptrivia.util.logging import configure_logging
+from poptrivia.webhook import router as webhook_router
 
 log = logging.getLogger("poptrivia")
 
@@ -23,6 +24,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="poptrivia", lifespan=lifespan)
+app.include_router(webhook_router)
 
 
 @app.get("/health")
