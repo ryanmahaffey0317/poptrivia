@@ -26,18 +26,26 @@ async def prepare_movie(
     movie: Movie,
     settings: Settings,
     db: Database,
+    manual_sources: list[Path] | None = None,
 ) -> Path:
     """Run the full prep pipeline for a single movie.
 
     Returns the path to the written track file. Raises PipelineError on
     fatal issues. OllamaUnavailable bubbles up to the caller so the queue
     worker can back off.
+
+    If `manual_sources` are supplied, each file's text is appended as an
+    `imdb_trivia` source item and the IMDB *network* scrape is skipped
+    entirely — the user is telling us "use this paste instead." Wikipedia
+    and TMDB still run normally.
     """
     log.info("Prep starting for %s (%s)", movie.title, movie.plex_guid)
     await db.set_movie_status(movie.plex_guid, MovieStatus.GENERATING)
 
     # 1. Scrape source material -----------------------------------------
-    source_items = await _gather_sources(movie=movie, settings=settings)
+    source_items = await _gather_sources(
+        movie=movie, settings=settings, manual_sources=manual_sources or []
+    )
     if not source_items:
         raise PipelineError("No source material found from IMDB or Wikipedia")
     log.info("Sources: %d items", len(source_items))
@@ -105,11 +113,35 @@ async def prepare_movie(
 
 
 async def _gather_sources(
-    *, movie: Movie, settings: Settings
+    *,
+    movie: Movie,
+    settings: Settings,
+    manual_sources: list[Path],
 ) -> list[RawSourceItem]:
     items: list[RawSourceItem] = []
 
-    if movie.imdb_id:
+    if manual_sources:
+        for src_path in manual_sources:
+            try:
+                text = src_path.read_text(encoding="utf-8")
+            except OSError as e:
+                log.warning("Could not read manual source %s: %s", src_path, e)
+                continue
+            text = text.strip()
+            if not text:
+                log.warning("Manual source %s is empty — skipping", src_path)
+                continue
+            items.append(RawSourceItem(source="imdb_trivia", text=text))
+            log.info(
+                "Loaded manual source %s (%d chars) as imdb_trivia",
+                src_path,
+                len(text),
+            )
+        log.info(
+            "Skipping IMDB network scrape — %d manual source(s) supplied",
+            len(manual_sources),
+        )
+    elif movie.imdb_id:
         try:
             items.extend(await imdb_source.fetch_trivia(movie.imdb_id, settings.cache_dir))
         except Exception as e:

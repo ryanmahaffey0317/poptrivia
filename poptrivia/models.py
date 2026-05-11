@@ -129,6 +129,7 @@ class PrepJob(BaseModel):
     status: JobStatus
     attempts: int = 0
     last_error: str | None = None
+    manual_sources: list[str] = Field(default_factory=list)
     created_at: datetime | None = None
     started_at: datetime | None = None
     finished_at: datetime | None = None

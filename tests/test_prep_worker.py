@@ -72,7 +72,7 @@ async def test_successful_prep_marks_ready_and_notifies(
     )
     await db.enqueue_job("plex://movie/abc")
 
-    async def fake_prepare(*, movie, settings, db):
+    async def fake_prepare(*, movie, settings, db, manual_sources=None):
         track_path = settings.tracks_dir / "plex___movie_abc.json"
         track_path.write_text(json.dumps({"cards": [{"id": "x"}] * 17}))
         await db.set_movie_status(

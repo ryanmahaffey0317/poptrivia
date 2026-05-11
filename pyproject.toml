@@ -17,6 +17,7 @@ dependencies = [
     "beautifulsoup4>=4.12",
     "pysrt>=1.1.2",
     "wikipedia>=1.4.0",
+    "cloudscraper>=1.2.71",
 ]
 
 [project.optional-dependencies]

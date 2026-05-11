@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import traceback
+from pathlib import Path
 
 from poptrivia.config import Settings
 from poptrivia.db import Database
@@ -87,9 +88,13 @@ class PrepWorker:
         )
         await self.db.mark_job_running(job.id)
 
+        manual_sources = [Path(p) for p in (job.manual_sources or [])]
         try:
             track_path = await prepare_movie(
-                movie=movie, settings=self.settings, db=self.db
+                movie=movie,
+                settings=self.settings,
+                db=self.db,
+                manual_sources=manual_sources,
             )
         except OllamaUnavailable as e:
             log.warning(

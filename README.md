@@ -328,6 +328,33 @@ docker compose exec poptrivia sqlite3 /config/poptrivia.db \
   no IMDB ID + no Wikipedia match, no embedded or sidecar subtitles
   (and Whisper not installed), Ollama returned malformed JSON.
 
+### "IMDB returns HTTP 202 (Cloudflare blocked)"
+
+poptrivia uses `cloudscraper` to handle Cloudflare's stealth checks
+when scraping IMDB trivia and goofs. If the challenge math evolves
+faster than the library and we start seeing persistent 202 retries in
+the logs, fall back to the **manual paste workflow**:
+
+1. Open the movie's IMDB trivia page in your normal browser
+   (`https://www.imdb.com/title/<imdb-id>/trivia/`).
+2. Select all the trivia text shown on the page (cmd+A then copy, or
+   click-drag through every item).
+3. Paste into a plain `.txt` file at
+   `/mnt/user/appdata/poptrivia/config/manual_sources/<movie>_trivia.txt`.
+   Do the same for the goofs page if relevant.
+4. Run prep with `--sources-file`:
+
+   ```bash
+   docker exec poptrivia python scripts/prep_movie.py \
+       --guid plex://movie/<id> \
+       --sources-file /config/manual_sources/<movie>_trivia.txt \
+       --sources-file /config/manual_sources/<movie>_goofs.txt
+   ```
+
+When `--sources-file` is supplied the IMDB *network* scrape is skipped
+entirely; the file contents are fed to Stage 1 as if they came from
+IMDB. Wikipedia and TMDB still run normally.
+
 ### "Ollama unreachable"
 
 The container needs to resolve `OLLAMA_URL` from inside Docker. If

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -28,19 +29,26 @@ CREATE TABLE IF NOT EXISTS movies (
 );
 
 CREATE TABLE IF NOT EXISTS prep_jobs (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    plex_guid   TEXT NOT NULL,
-    status      TEXT NOT NULL,
-    attempts    INTEGER DEFAULT 0,
-    last_error  TEXT,
-    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    started_at  TIMESTAMP,
-    finished_at TIMESTAMP,
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    plex_guid       TEXT NOT NULL,
+    status          TEXT NOT NULL,
+    attempts        INTEGER DEFAULT 0,
+    last_error      TEXT,
+    manual_sources  TEXT,
+    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    started_at      TIMESTAMP,
+    finished_at     TIMESTAMP,
     FOREIGN KEY (plex_guid) REFERENCES movies(plex_guid)
 );
 
 CREATE INDEX IF NOT EXISTS idx_prep_jobs_status ON prep_jobs(status, id);
 """
+
+
+# Idempotent migrations for installs that predate a column.
+_MIGRATIONS = [
+    "ALTER TABLE prep_jobs ADD COLUMN manual_sources TEXT",
+]
 
 
 class Database:
@@ -61,6 +69,13 @@ class Database:
         await self._conn.execute("PRAGMA journal_mode=WAL")
         await self._conn.execute("PRAGMA foreign_keys=ON")
         await self._conn.executescript(SCHEMA)
+        for stmt in _MIGRATIONS:
+            try:
+                await self._conn.execute(stmt)
+            except aiosqlite.OperationalError as e:
+                # "duplicate column name" on subsequent boots — fine.
+                if "duplicate column" not in str(e).lower():
+                    raise
         await self._conn.commit()
         log.info("SQLite ready at %s", self.path)
 
@@ -187,10 +202,17 @@ class Database:
 
     # ─── prep_jobs ──────────────────────────────────────────────────
 
-    async def enqueue_job(self, plex_guid: str) -> int:
+    async def enqueue_job(
+        self,
+        plex_guid: str,
+        *,
+        manual_sources: list[str] | None = None,
+    ) -> int:
+        encoded = json.dumps(manual_sources) if manual_sources else None
         cur = await self.conn.execute(
-            "INSERT INTO prep_jobs (plex_guid, status) VALUES (?, ?)",
-            (plex_guid, JobStatus.PENDING.value),
+            "INSERT INTO prep_jobs (plex_guid, status, manual_sources) "
+            "VALUES (?, ?, ?)",
+            (plex_guid, JobStatus.PENDING.value, encoded),
         )
         await self.conn.commit()
         assert cur.lastrowid is not None
@@ -282,12 +304,22 @@ def _row_to_movie(row: aiosqlite.Row) -> Movie:
 
 
 def _row_to_job(row: aiosqlite.Row) -> PrepJob:
+    raw_sources = row["manual_sources"]
+    sources: list[str] = []
+    if raw_sources:
+        try:
+            decoded = json.loads(raw_sources)
+            if isinstance(decoded, list):
+                sources = [str(p) for p in decoded]
+        except (json.JSONDecodeError, TypeError):
+            log.warning("prep_jobs.manual_sources is malformed JSON: %r", raw_sources)
     return PrepJob(
         id=row["id"],
         plex_guid=row["plex_guid"],
         status=JobStatus(row["status"]),
         attempts=row["attempts"] or 0,
         last_error=row["last_error"],
+        manual_sources=sources,
         created_at=_parse_ts(row["created_at"]),
         started_at=_parse_ts(row["started_at"]),
         finished_at=_parse_ts(row["finished_at"]),
