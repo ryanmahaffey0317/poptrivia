@@ -176,7 +176,20 @@ async def _try_ffmpeg(file_path: Path) -> list[SubtitleEntry] | None:
         log.warning("ffmpeg/ffprobe not on PATH; skipping embedded subs")
         return None
 
-    text_streams = await _probe_text_subtitle_streams(file_path)
+    text_streams, all_streams = await _probe_subtitle_streams(file_path)
+
+    # Log every stream so we can see why ffprobe might be confused about
+    # what's "text" vs image-based.
+    if all_streams:
+        log.info(
+            "ffprobe subtitle streams in %s: %s",
+            file_path.name,
+            ", ".join(
+                f"0:s:{i} codec={c!r} lang={l!r}"
+                for (i, c, l, _t) in all_streams
+            ),
+        )
+
     if not text_streams:
         log.info("ffprobe found no text-based subtitle streams in %s", file_path.name)
         return None
@@ -198,12 +211,19 @@ async def _try_ffmpeg(file_path: Path) -> list[SubtitleEntry] | None:
     return None
 
 
-async def _probe_text_subtitle_streams(file_path: Path) -> list[int]:
-    """Return subtitle-namespace indices of text-based streams (English preferred).
+async def _probe_subtitle_streams(
+    file_path: Path,
+) -> tuple[list[int], list[tuple[int, str, str, str]]]:
+    """Probe all subtitle streams.
 
-    ffprobe gives us absolute stream indices via `stream=index`, but ffmpeg's
-    `-map 0:s:N` uses an index within the subtitle namespace. We track both
-    and return the subtitle-namespace index.
+    Returns (text_stream_indices, all_streams) where:
+      - text_stream_indices is the list of subtitle-namespace indices of
+        text-based streams, ranked English-first non-commentary-first.
+      - all_streams is every stream as (idx, codec, language, title) for
+        diagnostic logging.
+
+    ffmpeg's `-map 0:s:N` uses an index within the subtitle namespace,
+    which is what we return.
     """
     cmd = [
         "ffprobe",
@@ -233,20 +253,19 @@ async def _probe_text_subtitle_streams(file_path: Path) -> list[int]:
             pass
         await proc.wait()
         log.warning("ffprobe timed out for %s", file_path)
-        return []
+        return [], []
 
     if proc.returncode != 0 or not stdout:
         log.warning("ffprobe failed (rc=%s) for %s", proc.returncode, file_path)
-        return []
+        return [], []
 
     try:
         data = json.loads(stdout)
     except json.JSONDecodeError as e:
         log.warning("ffprobe returned non-JSON: %s", e)
-        return []
+        return [], []
 
     streams = data.get("streams") or []
-    # Build (sub_namespace_index, codec_name, language, title) tuples.
     enriched: list[tuple[int, str, str, str]] = []
     for sub_idx, s in enumerate(streams):
         codec = (s.get("codec_name") or "").lower()
@@ -255,16 +274,12 @@ async def _probe_text_subtitle_streams(file_path: Path) -> list[int]:
         title = (tags.get("title") or "").lower()
         enriched.append((sub_idx, codec, lang, title))
 
-    # Drop image-based codecs. Keep text codecs.
     text_streams = [
         (idx, codec, lang, title)
         for (idx, codec, lang, title) in enriched
         if codec in _TEXT_SUB_CODECS
     ]
-    if not text_streams:
-        return []
 
-    # Prefer English non-commentary streams.
     def _rank(item: tuple[int, str, str, str]) -> tuple[int, int]:
         _idx, _codec, lang, title = item
         eng = 0 if lang in ("eng", "en", "english") else 1
@@ -272,7 +287,7 @@ async def _probe_text_subtitle_streams(file_path: Path) -> list[int]:
         return (eng, commentary)
 
     text_streams.sort(key=_rank)
-    return [idx for (idx, _codec, _lang, _title) in text_streams]
+    return [idx for (idx, _c, _l, _t) in text_streams], enriched
 
 
 async def _run_ffmpeg_to_srt(file_path: Path, stream_index: int) -> str | None:

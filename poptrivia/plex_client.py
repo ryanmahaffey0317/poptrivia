@@ -72,14 +72,34 @@ class PlexClient:
         return await self._fetch_streams(rating_key)
 
     async def download_subtitle(self, stream_id: int) -> str:
-        """Fetch the subtitle stream content (typically SRT text)."""
-        url = f"{self.base_url}/library/streams/{stream_id}"
-        r = await self._client.get(url, headers=self._auth_headers())
-        if r.status_code != 200:
-            raise PlexError(
-                f"Plex /library/streams/{stream_id} returned HTTP {r.status_code}"
+        """Fetch the subtitle stream content (typically SRT text).
+
+        Plex requires the format extension (`.srt`, `.vtt`) in the URL for
+        externally-downloaded subtitles, otherwise it 501s. We try the
+        extension forms first and fall back to the bare endpoint last
+        (which works for some embedded subs).
+        """
+        last_error: str | None = None
+        for url in (
+            f"{self.base_url}/library/streams/{stream_id}.srt",
+            f"{self.base_url}/library/streams/{stream_id}.vtt",
+            f"{self.base_url}/library/streams/{stream_id}",
+        ):
+            try:
+                r = await self._client.get(url, headers=self._auth_headers())
+            except httpx.HTTPError as e:
+                last_error = f"{type(e).__name__}: {e}"
+                continue
+            if r.status_code == 200 and r.text:
+                log.debug("Plex stream %s downloaded via %s", stream_id, url)
+                return r.text
+            last_error = (
+                f"{url.rsplit('/', 1)[-1]} -> HTTP {r.status_code}"
             )
-        return r.text
+        raise PlexError(
+            f"All Plex stream download URLs failed for stream {stream_id} "
+            f"(last: {last_error})"
+        )
 
     # ─── internals ──────────────────────────────────────────────────
 
