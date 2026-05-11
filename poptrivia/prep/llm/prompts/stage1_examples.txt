@@ -1,0 +1,121 @@
+# Few-shot examples for stage 1 fact extraction.
+# Format:
+#   INPUT (source, optional section): <raw text>
+#   OUTPUT: <JSON array>
+#
+# Examples are deliberately a mix of positive (good extraction) and
+# negative (input that should produce []).
+# ---------------------------------------------------------------------------
+
+INPUT (imdb_trivia):
+Stanley Kubrick had Shelley Duvall perform the baseball bat scene 127 times,
+which earned a Guinness record for most retakes of a single scene with
+spoken dialogue. By Duvall's account she became so dehydrated that her hair
+began falling out.
+OUTPUT:
+[
+  {
+    "fact": "Stanley Kubrick had Shelley Duvall perform the baseball bat scene 127 times — a Guinness record for most retakes of a single scene with spoken dialogue. Duvall reported that the strain caused her hair to fall out.",
+    "source": "imdb_trivia",
+    "specificity": "high",
+    "anchors": ["baseball bat", "Wendy", "stairs"],
+    "category": "production"
+  }
+]
+
+# ---------------------------------------------------------------------------
+
+INPUT (imdb_trivia):
+This film is regarded by many as a horror masterpiece and is considered one
+of the greatest films ever made.
+OUTPUT:
+[]
+# Reason: pure puffery, no specific facts.
+
+# ---------------------------------------------------------------------------
+
+INPUT (wikipedia, section=Production):
+Filming took place at EMI Elstree Studios in Hertfordshire, England, between
+May 1978 and April 1979. Kubrick had production designer Roy Walker travel
+across the United States photographing hotels to inform the design of the
+Overlook Hotel interior. The Colorado Lounge was at the time the largest
+set ever built at Elstree, occupying an entire soundstage.
+OUTPUT:
+[
+  {
+    "fact": "Production designer Roy Walker travelled across the United States photographing hotels so that Kubrick could compose the fictional Overlook from elements of multiple real interiors.",
+    "source": "wikipedia",
+    "specificity": "high",
+    "anchors": ["Overlook Hotel", "lobby"],
+    "category": "production"
+  },
+  {
+    "fact": "The Colorado Lounge set was at the time the largest ever built at EMI Elstree Studios, occupying an entire soundstage.",
+    "source": "wikipedia",
+    "specificity": "medium",
+    "anchors": ["Colorado Lounge", "lobby"],
+    "category": "production"
+  }
+]
+# Note: the date range was dropped because Kubrick's filming schedule on its
+# own isn't pop-up-video material; the *unusual* facts (hotel research,
+# largest-set claim) are.
+
+# ---------------------------------------------------------------------------
+
+INPUT (imdb_goofs):
+When Danny is riding his Big Wheel through the corridors, the wheels make
+noise on the floorboards but go silent over the carpet, which is consistent
+with the soundtrack. However, in one shot the camera angle reverses and the
+shadow of the dolly track is briefly visible on the wallpaper.
+OUTPUT:
+[
+  {
+    "fact": "During one of Danny's Big Wheel corridor sequences, a reverse-angle shot briefly exposes the shadow of the dolly track on the wallpaper.",
+    "source": "imdb_goofs",
+    "specificity": "medium",
+    "anchors": ["Big Wheel", "Danny", "corridor"],
+    "category": "goof"
+  }
+]
+# Note: the first sentence ("wheels make noise on floorboards…") is not a
+# goof — it's a continuity success — so it's dropped.
+
+# ---------------------------------------------------------------------------
+
+INPUT (wikipedia, section=Reception):
+The Shining is widely regarded as one of the greatest horror films of all
+time. It was met with mixed reviews on initial release; some critics, like
+Variety, called it "a disappointment." Stephen King, the author of the
+source novel, was famously unhappy with the adaptation, repeatedly calling
+the film "a Cadillac with no engine inside it." In 2018 the film was
+selected for preservation in the United States National Film Registry.
+OUTPUT:
+[
+  {
+    "fact": "Stephen King, who wrote the source novel, was famously unhappy with Kubrick's adaptation and repeatedly described the film as 'a Cadillac with no engine inside it.'",
+    "source": "wikipedia",
+    "specificity": "high",
+    "anchors": [],
+    "category": "cultural_impact"
+  },
+  {
+    "fact": "In 2018 the film was selected for preservation in the United States National Film Registry.",
+    "source": "wikipedia",
+    "specificity": "medium",
+    "anchors": [],
+    "category": "cultural_impact"
+  }
+]
+# Note: dropped the "widely regarded" sentence (puffery) and the unattributed
+# "mixed reviews" line (vague). Variety's "disappointment" quote could
+# arguably stand alone but is weaker than the King quote on the same topic.
+
+# ---------------------------------------------------------------------------
+
+INPUT (imdb_trivia):
+Some viewers have noted that there is a moment in the film where it almost
+seems as if something supernatural is happening.
+OUTPUT:
+[]
+# Reason: pure hedge ("some viewers", "almost seems as if"), no concrete claim.
