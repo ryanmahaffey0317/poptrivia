@@ -56,6 +56,11 @@ _FFMPEG_TIMEOUT_SECONDS = 300
 _FFPROBE_TIMEOUT_SECONDS = 20
 _AUDIO_EXTRACT_TIMEOUT_SECONDS = 600  # ~10 min ceiling for audio rip
 
+# Some files (archival multi-language remuxes) have 100+ text subtitle
+# streams. Trying each one with a 300s ceiling could mean hours per movie.
+# Cap how many we attempt before falling through to sidecar / Plex / Whisper.
+_MAX_FFMPEG_STREAM_ATTEMPTS = 5
+
 
 async def extract(
     file_path: Path,
@@ -198,12 +203,19 @@ async def _try_ffmpeg(file_path: Path) -> list[SubtitleEntry] | None:
         return None
 
     log.info(
-        "ffprobe found %d text subtitle stream(s) at indices %s",
+        "ffprobe found %d text subtitle stream(s) at indices %s%s",
         len(text_streams),
-        text_streams,
+        text_streams[:_MAX_FFMPEG_STREAM_ATTEMPTS],
+        (
+            f" (capping attempts at {_MAX_FFMPEG_STREAM_ATTEMPTS}; "
+            f"{len(text_streams) - _MAX_FFMPEG_STREAM_ATTEMPTS} more "
+            "skipped)"
+            if len(text_streams) > _MAX_FFMPEG_STREAM_ATTEMPTS
+            else ""
+        ),
     )
 
-    for stream_index in text_streams:
+    for stream_index in text_streams[:_MAX_FFMPEG_STREAM_ATTEMPTS]:
         log.info("Extracting embedded subtitle stream 0:s:%d", stream_index)
         out = await _run_ffmpeg_to_srt(file_path, stream_index)
         if out is None:
