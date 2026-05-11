@@ -116,21 +116,38 @@ def _raw_fact(
     )
 
 
-def test_assign_facts_anchor_match_goes_to_first_matching_window() -> None:
-    """A fact whose anchor appears in the subtitles is assigned to that
-    window — even if a later one also matches."""
+def test_assign_facts_anchor_match_goes_only_to_matching_windows() -> None:
+    """An anchored fact never lands in a window where the anchor doesn't
+    appear, regardless of load."""
     facts = [
-        _raw_fact("Bat scene took 127 takes.", anchors=["baseball bat"]),
+        _raw_fact("Bat fact", anchors=["baseball bat"]),
     ]
     windows = [
-        (0, 900_000, [SubtitleEntry(0, 5000, "Hello")]),
+        (0, 900_000, [SubtitleEntry(0, 5000, "Hello world")]),
         (900_000, 1_800_000, [SubtitleEntry(0, 5000, "She picks up the baseball bat.")]),
-        (1_800_000, 2_700_000, [SubtitleEntry(0, 5000, "The baseball bat again.")]),
+        (1_800_000, 2_700_000, [SubtitleEntry(0, 5000, "Generic dialogue")]),
     ]
     assigned = _assign_facts_to_windows(facts, windows)
     assert assigned[0] == []
     assert len(assigned[1]) == 1
-    assert assigned[2] == []  # placed in first match only
+    assert assigned[2] == []
+
+
+def test_assign_facts_balances_when_anchor_matches_many_windows() -> None:
+    """The common-anchor problem (character names appear everywhere):
+    facts must spread, not pile up in window 0."""
+    facts = [
+        _raw_fact(f"Annie fact {i}", anchors=["Annie"])
+        for i in range(6)
+    ]
+    windows = [
+        (i * 900_000, (i + 1) * 900_000, [SubtitleEntry(0, 5000, "Annie says hi.")])
+        for i in range(3)
+    ]
+    assigned = _assign_facts_to_windows(facts, windows)
+    counts = [len(w) for w in assigned]
+    # 6 facts / 3 matching windows -> exactly 2 each, not 6/0/0.
+    assert counts == [2, 2, 2], counts
 
 
 def test_assign_facts_anchorless_round_robin_distributes_across_windows() -> None:
@@ -178,11 +195,9 @@ def test_assign_facts_anchorless_high_specificity_distributed_first() -> None:
         (900_000, 1_800_000, [SubtitleEntry(0, 1, "y")]),
     ]
     assigned = _assign_facts_to_windows(facts, windows)
-    # First slot per window goes to high-specificity (sorted first).
-    assert assigned[0][0].fact == "High A"
-    assert assigned[1][0].fact == "High B"
-    assert assigned[0][1].fact == "Low 1"
-    assert assigned[1][1].fact == "Low 2"
+    # First two slots get high-specificity (one per window), then lows.
+    assert {assigned[0][0].fact, assigned[1][0].fact} == {"High A", "High B"}
+    assert {assigned[0][1].fact, assigned[1][1].fact} == {"Low 1", "Low 2"}
 
 
 def test_assign_facts_handles_empty_windows_list() -> None:

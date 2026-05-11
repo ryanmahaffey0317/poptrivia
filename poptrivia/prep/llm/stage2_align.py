@@ -177,26 +177,31 @@ def _assign_facts_to_windows(
     facts: list[RawFactExtracted],
     windows: list[tuple[int, int, list[SubtitleEntry]]],
 ) -> list[list[RawFactExtracted]]:
-    """Decide which window each fact belongs to.
+    """Decide which window each fact belongs to, with load balancing.
 
-    - Anchored facts: scan windows in order, place in the first window
-      whose subtitles contain any anchor token (case-insensitive).
-    - Anchor-less facts (and anchored facts that didn't match anywhere):
-      distribute round-robin starting from window 0, ranked by
-      specificity descending so high-quality facts spread first.
+    - Anchored facts: scanned against every window's subtitle blob. We
+      collect ALL matching windows, then assign to whichever has the
+      fewest facts so far (ties broken by lower index = earlier in the
+      film). This prevents character-name anchors like "Annie" from
+      dumping every related fact into window 1.
+    - Anchor-less facts (and anchored facts that matched nowhere): also
+      assigned to the least-loaded window, sorted by specificity desc so
+      high-quality facts spread first.
 
-    The model still gets to choose the precise timestamp within its
-    assigned window.
+    Result: even distribution across the timeline regardless of how
+    common the anchor terms are.
     """
     if not windows:
         return []
     n_windows = len(windows)
     assignment: list[list[RawFactExtracted]] = [[] for _ in range(n_windows)]
 
-    # Pre-lowercase each window's subtitle text once.
     window_blobs = [
         " ".join(s.text for s in subs).lower() for (_a, _b, subs) in windows
     ]
+
+    def _least_loaded_among(candidate_indices: list[int]) -> int:
+        return min(candidate_indices, key=lambda i: (len(assignment[i]), i))
 
     leftover: list[RawFactExtracted] = []
     for fact in facts:
@@ -204,21 +209,23 @@ def _assign_facts_to_windows(
         if not anchors:
             leftover.append(fact)
             continue
-        placed = False
-        for idx, blob in enumerate(window_blobs):
-            if any(a.lower() in blob for a in anchors):
-                assignment[idx].append(fact)
-                placed = True
-                break
-        if not placed:
+        matching = [
+            idx
+            for idx, blob in enumerate(window_blobs)
+            if any(a.lower() in blob for a in anchors)
+        ]
+        if not matching:
             leftover.append(fact)
+            continue
+        assignment[_least_loaded_among(matching)].append(fact)
 
-    # Round-robin distribute leftover (anchor-less / unmatched) facts.
-    # Sort by specificity desc so the strong stuff is spread across the
-    # whole timeline rather than clustered at the front.
+    # Round-robin distribute leftover facts to the globally-emptiest
+    # window. Sort by specificity desc so the strong stuff is spread
+    # first.
     leftover.sort(key=lambda f: -_SPECIFICITY_RANK.get(f.specificity, 0))
-    for i, fact in enumerate(leftover):
-        assignment[i % n_windows].append(fact)
+    all_windows = list(range(n_windows))
+    for fact in leftover:
+        assignment[_least_loaded_among(all_windows)].append(fact)
 
     return assignment
 
