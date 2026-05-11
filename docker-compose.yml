@@ -1,0 +1,12 @@
+services:
+  poptrivia:
+    build: .
+    container_name: poptrivia
+    restart: unless-stopped
+    ports:
+      - "8765:8765"
+    env_file:
+      - .env
+    volumes:
+      - ./config:/config
+      - /mnt/user/media:/media:ro
