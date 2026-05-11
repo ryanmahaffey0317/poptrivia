@@ -157,13 +157,14 @@ async def _gather_sources(
         log.warning("No imdb_id for %s — skipping IMDB scrapers", movie.plex_guid)
 
     try:
-        items.extend(
-            await wiki_source.fetch_article(movie.title, movie.year, settings.cache_dir)
+        wiki_items = await wiki_source.fetch_article(
+            movie.title, movie.year, settings.cache_dir
         )
+        log.info("Wikipedia parsed %d section(s) for %r", len(wiki_items), movie.title)
+        items.extend(wiki_items)
     except Exception as e:
         log.warning("Wikipedia fetch failed for %r: %s", movie.title, e)
 
-    # TMDB is metadata-only; we attach it as context inside (lead) for now.
     if settings.tmdb_api_key and (movie.tmdb_id or movie.imdb_id):
         try:
             meta = await tmdb_source.fetch_metadata(
@@ -175,8 +176,11 @@ async def _gather_sources(
             text = _tmdb_to_text(meta)
             if text:
                 items.append(RawSourceItem(source="wikipedia", section="TMDB", text=text))
+                log.info("TMDB metadata attached as 1 source chunk")
         except Exception as e:
             log.warning("TMDB fetch failed: %s", e)
+    elif not settings.tmdb_api_key:
+        log.info("TMDB skipped: TMDB_API_KEY not configured")
 
     return items
 

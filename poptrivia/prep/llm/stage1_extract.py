@@ -220,32 +220,84 @@ def _parse_facts(result: dict, source: str) -> list[RawFactExtracted]:
 
 
 _NORMALIZE_RE = re.compile(r"[^a-z0-9 ]+")
+_TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 
 def _normalize(text: str) -> str:
     return _NORMALIZE_RE.sub(" ", text.lower()).strip()
 
 
-def _dedupe(facts: list[RawFactExtracted]) -> list[RawFactExtracted]:
-    """Drop facts whose first ~80 chars (normalized) repeat an earlier fact.
-
-    The brief explicitly says: don't introduce embeddings for v1. This
-    catches obvious paraphrase-near-duplicates and exact dupes from
-    overlapping source material (e.g. IMDB and Wikipedia both mentioning the
-    same anecdote).
+# Common English stopwords + filler that don't help distinguish facts.
+# Trimmed to the high-frequency ones that would otherwise pollute Jaccard
+# overlap calculations.
+_STOPWORDS: frozenset[str] = frozenset(
     """
-    seen: set[str] = set()
-    out: list[RawFactExtracted] = []
-    for f in facts:
-        key = _normalize(f.fact)[:80]
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        out.append(f)
-    return out
+    the a an and or but of for to in on at by with from as is was were be
+    been being this that these those it its his her their he she they
+    you we us our your i had has have having do did does done would could
+    should will shall may might can must than then so if while during
+    after before because since until when where which who whom whose
+    what why how also too just very much many more most some any all
+    each every other another such only own same about over under into
+    out up down off out across against between within without through
+    such whether either neither
+    """.split()
+)
 
+# Two facts are considered duplicates when their significant-token sets
+# overlap by more than this fraction. We use the *overlap coefficient*
+# (|A∩B| / min(|A|, |B|)) rather than Jaccard because cross-source
+# paraphrases tend to use synonyms — Jaccard's union grows with synonym
+# variance and depresses the score below useful thresholds. Overlap
+# coefficient is invariant to the longer fact's extra unique tokens.
+_DEDUPE_OVERLAP_THRESHOLD = 0.55
 
 _SPECIFICITY_RANK = {"high": 3, "medium": 2, "low": 1}
+
+
+def _significant_tokens(text: str) -> set[str]:
+    """Lowercase tokens, alphanumeric, stopwords + short words dropped.
+
+    The remaining set is the 'fingerprint' of the fact — proper nouns,
+    numbers, specific verbs and rare words dominate.
+    """
+    return {
+        w for w in _TOKEN_RE.findall(text.lower())
+        if len(w) > 2 and w not in _STOPWORDS
+    }
+
+
+def _dedupe(facts: list[RawFactExtracted]) -> list[RawFactExtracted]:
+    """Drop facts that overlap heavily with a kept fact.
+
+    Catches both verbatim duplicates and cross-source paraphrases (IMDB
+    and Wikipedia describing the same anecdote in different words). When
+    two facts collide, we keep the higher-specificity one.
+
+    O(n²) over kept-facts; fine for n in the low hundreds.
+    """
+    kept: list[tuple[RawFactExtracted, set[str]]] = []
+    for f in facts:
+        toks = _significant_tokens(f.fact)
+        if not toks:
+            continue
+        f_rank = _SPECIFICITY_RANK.get(f.specificity, 0)
+        dup_index: int | None = None
+        for i, (_existing, existing_toks) in enumerate(kept):
+            inter = len(toks & existing_toks)
+            denom = min(len(toks), len(existing_toks))
+            if denom and inter / denom >= _DEDUPE_OVERLAP_THRESHOLD:
+                dup_index = i
+                break
+        if dup_index is None:
+            kept.append((f, toks))
+            continue
+        # Collision: keep the better one.
+        existing, _ = kept[dup_index]
+        existing_rank = _SPECIFICITY_RANK.get(existing.specificity, 0)
+        if f_rank > existing_rank:
+            kept[dup_index] = (f, toks)
+    return [f for (f, _t) in kept]
 
 
 def _rank_and_trim(

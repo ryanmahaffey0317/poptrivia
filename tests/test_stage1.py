@@ -31,6 +31,41 @@ def test_dedupe_drops_normalized_duplicates() -> None:
     assert out[1].fact.startswith("The Colorado")
 
 
+def test_dedupe_catches_cross_source_paraphrase() -> None:
+    """Same fact phrased two ways (IMDB vs Wikipedia) should collapse."""
+    facts = [
+        _fact("Stanley Kubrick demanded 127 retakes of the baseball bat scene."),
+        _fact("The famous baseball-bat scene was filmed in 127 separate takes by Kubrick."),
+    ]
+    out = _dedupe(facts)
+    assert len(out) == 1, [f.fact for f in out]
+
+
+def test_dedupe_keeps_distinct_facts_with_shared_subject() -> None:
+    """Two genuinely different facts about the same scene must NOT collapse."""
+    facts = [
+        _fact("Kubrick demanded 127 retakes of the baseball bat scene."),
+        _fact("Shelley Duvall reported losing her hair during the baseball bat scene."),
+    ]
+    out = _dedupe(facts)
+    assert len(out) == 2, [f.fact for f in out]
+
+
+def test_dedupe_collision_keeps_higher_specificity() -> None:
+    """When two near-duplicates collide, the higher-specificity one wins."""
+    high = _fact(
+        "Stanley Kubrick personally demanded 127 retakes of the baseball-bat scene.",
+        specificity="high",
+    )
+    low = _fact(
+        "The baseball bat scene was reshot many times.",
+        specificity="low",
+    )
+    out = _dedupe([low, high])
+    assert len(out) == 1
+    assert out[0].specificity == "high"
+
+
 def test_rank_and_trim_prefers_high_specificity() -> None:
     facts = [
         _fact("low one", "low"),

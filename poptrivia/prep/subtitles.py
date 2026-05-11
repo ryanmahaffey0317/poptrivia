@@ -49,7 +49,10 @@ _TEXT_SUB_CODECS: set[str] = {
     "subviewer",
 }
 
-_FFMPEG_TIMEOUT_SECONDS = 60
+# 2160p HEVC Remux files (~80 GB) take a while for ffmpeg to seek through
+# when extracting subtitle streams. 5 minutes is a generous ceiling that
+# tolerates spinning-disk arrays without being a footgun on stuck processes.
+_FFMPEG_TIMEOUT_SECONDS = 300
 _FFPROBE_TIMEOUT_SECONDS = 20
 _AUDIO_EXTRACT_TIMEOUT_SECONDS = 600  # ~10 min ceiling for audio rip
 
@@ -291,6 +294,9 @@ async def _probe_subtitle_streams(
 
 
 async def _run_ffmpeg_to_srt(file_path: Path, stream_index: int) -> str | None:
+    # `-c:s copy` skips re-encoding. For ffprobe-confirmed text streams
+    # (subrip / ass / mov_text / webvtt) the data is already SRT-compatible
+    # text, so copy is a fast bytewise dump rather than a transcode.
     cmd = [
         "ffmpeg",
         "-loglevel",
@@ -300,7 +306,7 @@ async def _run_ffmpeg_to_srt(file_path: Path, stream_index: int) -> str | None:
         "-map",
         f"0:s:{stream_index}",
         "-c:s",
-        "srt",
+        "copy",
         "-f",
         "srt",
         "-",
