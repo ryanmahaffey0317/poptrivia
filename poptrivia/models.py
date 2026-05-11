@@ -161,6 +161,18 @@ class RawFactExtracted(BaseModel):
     category: Category
 
 
+class RawSourceItem(BaseModel):
+    """A pre-LLM chunk of scraped source material.
+
+    Each scraper produces a list of these. Stage 1 walks them and produces
+    RawFactExtracted entries.
+    """
+
+    source: Literal["imdb_trivia", "imdb_goofs", "wikipedia"]
+    section: str = ""  # e.g. wikipedia section name; empty for IMDB items
+    text: str
+
+
 class TriviaCard(BaseModel):
     """Output of stage 2 — a fact placed at a specific timestamp."""
 
