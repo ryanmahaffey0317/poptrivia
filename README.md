@@ -1,13 +1,19 @@
 # poptrivia
 
 Pop-Up Video style trivia for Plex movies, delivered to a Discord channel
-while you watch. When someone starts a movie, poptrivia checks whether it
-has a pre-generated **trivia track** (a JSON list of timestamped cards
-about the production, the cast, easter eggs, goofs, etc.). If yes, it
-posts the cards to Discord as the corresponding moments play. If no, it
-queues a generation job: scrape IMDB + Wikipedia + TMDB, pull subtitles,
-run a two-stage LLM pipeline against an Ollama server, save the track,
-and notify you when it's ready.
+while you watch.
+
+It's **curated**, not automatic: you maintain a small list of movies you
+want trivia for in a text file (`/config/tracked.txt`). poptrivia handles
+everything from there — scraping sources, generating the track, and firing
+cards to Discord at the right timestamps when you play one of the movies
+on your list. Movies not on the list play normally with no side effects.
+
+The list is the only knob. Add a movie, walk away, poptrivia preps it in
+the background (Wikipedia + TMDB + IMDB sources → two-stage LLM pipeline
+against an Ollama server → saved track) and sends a Discord notification
+when it's ready. Play the movie later as the monitored user and the
+cards fire in real time.
 
 ---
 
@@ -215,10 +221,47 @@ docker compose exec poptrivia python scripts/test_discord.py
 Sends a sample trivia card and a system message. Useful after first
 configuration to confirm the webhook URLs are correct.
 
+## The tracked list
+
+`/config/tracked.txt` is the single source of truth for what gets prepped
+and what fires cards. A default template is written on first startup;
+edit it any time.
+
+```
+# poptrivia tracked-movies list. One movie per line.
+# Lines starting with # are comments. Inline comments allowed.
+
+tt0081505               # The Shining (1980)
+tt1478338               # Bridesmaids (2011)
+plex://movie/64725cf8d0c08684517444aa
+```
+
+Identifiers:
+- **IMDB id** (`tt...`) is preferred — durable, doesn't change.
+- **Plex GUID** (`plex://movie/...`) also works.
+
+Two complementary triggers act on this file:
+
+1. **Polling task** — every `TRACKED_POLL_INTERVAL_SECONDS` (default 30 min),
+   poptrivia scans tracked.txt against captured movie metadata in its DB
+   and queues prep for anything tracked but not yet prepped.
+2. **Webhook** — whenever a monitored user plays a movie, poptrivia checks
+   if it's in tracked.txt. If yes and the track is ready, cards fire. If
+   yes and the track isn't ready, prep is queued on the spot.
+
+If you add a movie to tracked.txt that you've never played, poptrivia will
+queue prep on the first play. If you add a movie you've previously played
+(metadata already captured), prep starts within 30 minutes — no playback
+required.
+
+Removing a movie from tracked.txt stops further prep work *and* stops
+cards from firing. The existing track file stays on disk; re-add to
+re-enable.
+
 ## How playback monitoring works
 
 When Tautulli sends a `Playback Start` event for a monitored user
-watching a movie:
+watching a **tracked** movie:
 
 - If the movie already has a `ready` track, poptrivia starts a
   **SessionMonitor** task tagged with the Plex `session_key`. The
@@ -228,15 +271,17 @@ watching a movie:
 - **Pause** — the monitor keeps polling, but doesn't fire while
   `state != playing`.
 - **Seek forward** — detected by playback-delta vs wall-clock divergence
-  > 10 s. Cards in the skipped range are silenced (marked fired without
-  posting), so re-entering the lookahead window after the seek doesn't
-  flood the channel.
+  > 10 s. Cards in the skipped range are silenced.
 - **Seek backward** — already-fired cards stay fired; they don't re-post.
 - **Stop / session disappears** — after 3 consecutive missing polls,
   the monitor posts a summary (`X of Y cards fired`) and exits.
 - **Mid-movie join** — any cards more than
   `MISSED_CARD_THRESHOLD_SECONDS` before the current offset are
   silenced on first poll.
+
+Playing an **untracked** movie is a no-op: metadata is captured (so you
+can add it to the list later without rewatching) but no cards fire and
+no prep is queued.
 
 ## Troubleshooting
 

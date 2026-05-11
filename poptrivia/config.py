@@ -57,6 +57,10 @@ class Settings(BaseSettings):
     tracks_dir: Path = Path("/config/tracks")
     cache_dir: Path = Path("/config/cache")
 
+    # Curated tracking
+    tracked_list_path: Path = Path("/config/tracked.txt")
+    tracked_poll_interval_seconds: int = 1800  # 30 minutes
+
     # Logging
     log_level: str = "INFO"
 

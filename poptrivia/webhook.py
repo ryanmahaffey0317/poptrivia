@@ -12,15 +12,12 @@ from pydantic import ValidationError
 from poptrivia.models import Movie, MovieStatus, TautulliEvent
 from poptrivia.session_monitor import SessionMonitor, load_track
 from poptrivia.tautulli_client import TautulliClient
+from poptrivia.tracked import is_tracked, read_tracked
 
 log = logging.getLogger("poptrivia.webhook")
 
 router = APIRouter()
 
-
-# Tautulli sends events for many actions; we only care about playback-start
-# style events that imply "someone is now watching". The rest get logged and
-# dropped (they'll matter once Step 12 wires SessionMonitor in).
 _START_EVENTS = {"play", "start", "playback.start", "playback_start"}
 
 
@@ -58,7 +55,7 @@ async def tautulli_webhook(request: Request) -> dict[str, Any]:
     settings = request.app.state.settings
     db = request.app.state.db
 
-    # ─── filters ────────────────────────────────────────────────────
+    # ─── coarse filters: skip everything we don't care about ────────
     if event.media_type != "movie":
         log.info("Ignoring non-movie event (media_type=%r)", event.media_type)
         return {"ok": True, "skipped": "not a movie"}
@@ -71,7 +68,9 @@ async def tautulli_webhook(request: Request) -> dict[str, Any]:
         )
         return {"ok": True, "skipped": "user not monitored"}
 
-    # ─── upsert movie row (always, so we can observe state) ─────────
+    # ─── capture metadata even for untracked movies ─────────────────
+    # That way, when the user adds an already-watched movie to tracked.txt,
+    # the next poll cycle can queue prep without requiring another play.
     movie = await db.upsert_movie(
         plex_guid=event.plex_guid,
         title=event.title,
@@ -81,10 +80,23 @@ async def tautulli_webhook(request: Request) -> dict[str, Any]:
         file_path=event.file,
     )
 
-    # ─── routing ────────────────────────────────────────────────────
+    # ─── is this movie in the curated list? ─────────────────────────
+    tracked = read_tracked(settings.tracked_list_path)
+    if not is_tracked(
+        tracked=tracked, imdb_id=event.imdb_id, plex_guid=event.plex_guid
+    ):
+        log.info(
+            "Movie %r (%s) is not in the tracked list — captured metadata "
+            "but doing nothing else",
+            event.title,
+            event.imdb_id or event.plex_guid,
+        )
+        return {"ok": True, "action": "metadata_captured", "tracked": False}
+
+    # ─── tracked: handle by event type + status ─────────────────────
     if event.event.lower() not in _START_EVENTS:
         log.info(
-            "Movie event but not a start event (event=%r, status=%s) — no routing",
+            "Tracked movie event but not a start event (event=%r, status=%s)",
             event.event,
             movie.status.value,
         )
@@ -103,15 +115,9 @@ async def tautulli_webhook(request: Request) -> dict[str, Any]:
             movie=movie,
             track_path=movie.track_path,
         )
-        return {
-            "ok": True,
-            "action": "monitor_started",
-            "status": movie.status.value,
-        }
+        return {"ok": True, "action": "monitor_started", "status": movie.status.value}
 
     if movie.status in (MovieStatus.NOT_STARTED, MovieStatus.FAILED):
-        # Guard against accidentally double-queueing: only enqueue if no
-        # pending/running job exists for this guid.
         if await db.has_active_job(event.plex_guid):
             log.info(
                 "Prep job already pending/running for %s — no new enqueue",
@@ -121,11 +127,14 @@ async def tautulli_webhook(request: Request) -> dict[str, Any]:
             job_id = await db.enqueue_job(event.plex_guid)
             await db.set_movie_status(event.plex_guid, MovieStatus.QUEUED)
             log.info(
-                "Queued prep job %d for %s (%s)", job_id, event.plex_guid, event.title
+                "Queued prep job %d for tracked movie %s (%s)",
+                job_id,
+                event.plex_guid,
+                event.title,
             )
         return {"ok": True, "action": "queued", "status": MovieStatus.QUEUED.value}
 
-    # status is queued or generating — just acknowledge.
+    # queued / generating
     log.info(
         "Prep already in progress for %s (status=%s) — no action",
         event.plex_guid,

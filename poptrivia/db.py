@@ -84,6 +84,12 @@ class Database:
             row = await cur.fetchone()
         return _row_to_movie(row) if row else None
 
+    async def list_movies(self) -> list[Movie]:
+        """Return every movie row. Cheap at our scale; we have at most ~hundreds."""
+        async with self.conn.execute("SELECT * FROM movies") as cur:
+            rows = await cur.fetchall()
+        return [_row_to_movie(r) for r in rows]
+
     async def upsert_movie(
         self,
         *,
