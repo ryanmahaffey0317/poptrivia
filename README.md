@@ -20,6 +20,9 @@ and notify you when it's ready.
 - **Ollama** — runs the LLM for fact extraction and timestamp alignment.
   Expected to live on a separate (LAN) machine; the queue worker tolerates
   it being offline and resumes when it comes back.
+- **Whisper service** *(strongly recommended)* — GPU-hosted Whisper API
+  on the same LAN, used as a subtitle fallback when a movie has no text
+  subs and no sidecar `.srt`. See "GPU Whisper setup" below.
 - **Discord webhook** — at least one channel webhook URL. Optionally a
   second webhook for system notifications (prep complete, prep failed).
 - **TMDB API key** *(optional)* — used to pull credits/keywords as
@@ -114,6 +117,71 @@ See `.env.example` for the canonical list. Key fields:
 | `MISSED_CARD_THRESHOLD_SECONDS`   | On mid-movie join, cards older than this are silenced. Default 30. |
 | `TARGET_CARDS_PER_MOVIE`          | Stage 1 produces ~1.5× this many candidate facts. Default 50. |
 | `MAX_CARDS_PER_MOVIE`             | Hard cap on the final track size. Default 70.        |
+
+## GPU Whisper setup
+
+2160p Remux and 4K UHD rips almost always ship with **image-based**
+subtitles (PGS / VOBSUB) which can't be converted to text without OCR.
+Rather than baking OCR or CPU Whisper into the poptrivia container,
+poptrivia POSTs audio to a separate Whisper service over HTTP. The
+service can run on any GPU machine on your LAN.
+
+Recommended server: [**Speaches**](https://github.com/speaches-ai/speaches)
+(formerly `faster-whisper-server`), OpenAI-API-compatible.
+
+On the GPU host (assumes NVIDIA + Docker w/ nvidia-container-toolkit):
+
+```yaml
+# docker-compose.yml on the GPU machine
+services:
+  speaches:
+    image: ghcr.io/speaches-ai/speaches:latest-cuda
+    container_name: speaches
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - speaches-cache:/home/ubuntu/.cache
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+volumes:
+  speaches-cache:
+```
+
+Bring it up, then pull the large-v3 model once:
+
+```bash
+docker compose up -d
+curl -X POST http://localhost:8000/v1/models/Systran/faster-whisper-large-v3
+```
+
+Smoke-test the API:
+
+```bash
+curl -F "file=@/path/to/test.opus" \
+     -F "model=Systran/faster-whisper-large-v3" \
+     -F "response_format=srt" \
+     http://localhost:8000/v1/audio/transcriptions
+```
+
+Then in poptrivia's `.env`:
+
+```bash
+WHISPER_URL=http://<gpu-host>:8000
+```
+
+Restart the poptrivia container and movies without text subs will
+automatically fall through to Whisper. Audio is uploaded as 24 kbps
+mono Opus (~22 MB for a 2-hour movie), so the network cost is
+negligible.
+
+A 2-hour movie on a 5090 with `large-v3` takes ~3–5 minutes to
+transcribe; CPU is 10–30× slower.
 
 ## Manually prepping a movie
 

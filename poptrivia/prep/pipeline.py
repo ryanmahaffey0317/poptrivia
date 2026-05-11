@@ -45,7 +45,12 @@ async def prepare_movie(
     # 2. Subtitles ------------------------------------------------------
     if not movie.file_path:
         raise PipelineError("movie.file_path is empty — cannot extract subtitles")
-    subs = await extract_subs(Path(movie.file_path))
+    subs = await extract_subs(
+        Path(movie.file_path),
+        whisper_url=settings.whisper_url,
+        whisper_model=settings.whisper_model,
+        whisper_timeout=settings.whisper_timeout,
+    )
     if not subs:
         raise PipelineError("Subtitle extraction returned 0 entries")
 

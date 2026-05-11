@@ -24,8 +24,16 @@ class Settings(BaseSettings):
 
     # Ollama
     ollama_url: str
-    ollama_model: str = "qwen2.5:32b-instruct-q5_K_M"
+    ollama_model: str = "qwen3:32b"
     ollama_timeout: int = 600
+
+    # Remote Whisper service (e.g. Speaches / faster-whisper-server on a
+    # GPU host). Used as the fallback when neither embedded subs nor a
+    # sidecar SRT are available. Leave blank to disable — prep then fails
+    # cleanly for any movie that has only image-based subs.
+    whisper_url: str = ""
+    whisper_model: str = "Systran/faster-whisper-large-v3"
+    whisper_timeout: int = 3600
 
     # Discord
     discord_webhook_url: str
@@ -59,13 +67,14 @@ class Settings(BaseSettings):
             return {part.strip() for part in v.split(",") if part.strip()}
         return v
 
-    @field_validator("tautulli_url", "ollama_url", mode="before")
+    @field_validator("tautulli_url", "ollama_url", "whisper_url", mode="before")
     @classmethod
     def _ensure_protocol(cls, v: object) -> object:
         """Prepend http:// if a bare host:port was provided.
 
         Easy footgun that wastes minutes of pipeline time before any LLM
         call fails with 'missing protocol'. We normalize at load time.
+        Empty strings pass through (whisper_url is optional).
         """
         if isinstance(v, str) and v and "://" not in v:
             return f"http://{v}"
