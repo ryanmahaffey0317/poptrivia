@@ -71,6 +71,7 @@ async def _try_ffmpeg(file_path: Path) -> list[SubtitleEntry] | None:
     # English stream requires probing first, which we skip — most movies'
     # stream 0:s:0 is English, and we fall back to sidecar/Whisper if not.
     for stream_index in range(3):
+        log.info("Trying embedded subtitle stream 0:s:%d", stream_index)
         out = await _run_ffmpeg_to_srt(file_path, stream_index)
         if out is None:
             continue
@@ -78,6 +79,9 @@ async def _try_ffmpeg(file_path: Path) -> list[SubtitleEntry] | None:
         if entries:
             return entries
     return None
+
+
+_FFMPEG_TIMEOUT_SECONDS = 60
 
 
 async def _run_ffmpeg_to_srt(file_path: Path, stream_index: int) -> str | None:
@@ -100,16 +104,38 @@ async def _run_ffmpeg_to_srt(file_path: Path, stream_index: int) -> str | None:
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    stdout, stderr = await proc.communicate()
+    try:
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(), timeout=_FFMPEG_TIMEOUT_SECONDS
+        )
+    except asyncio.TimeoutError:
+        log.warning(
+            "ffmpeg stream %d timed out after %ds — killing",
+            stream_index,
+            _FFMPEG_TIMEOUT_SECONDS,
+        )
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        await proc.wait()
+        return None
     if proc.returncode != 0 or not stdout:
-        # Most common case: stream index doesn't exist. Don't log loudly.
-        log.debug(
-            "ffmpeg subtitle stream %d failed (rc=%s): %s",
+        # Most common case: stream index doesn't exist.
+        log.info(
+            "ffmpeg subtitle stream %d failed (rc=%s)",
             stream_index,
             proc.returncode,
-            stderr.decode("utf-8", errors="replace")[:200],
+        )
+        log.debug(
+            "ffmpeg stream %d stderr: %s",
+            stream_index,
+            stderr.decode("utf-8", errors="replace")[:500],
         )
         return None
+    log.info(
+        "ffmpeg subtitle stream %d extracted (%d bytes)", stream_index, len(stdout)
+    )
     return stdout.decode("utf-8", errors="replace")
 
 

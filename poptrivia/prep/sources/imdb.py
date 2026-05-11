@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from pathlib import Path
@@ -13,13 +14,32 @@ from poptrivia.prep.sources._cache import cache_path, read_text, write_text
 log = logging.getLogger("poptrivia.prep.imdb")
 
 _BASE = "https://www.imdb.com"
+# Full browser-like header set. IMDB sits behind Cloudflare and returns
+# HTTP 202 (its silent stealth-block) for bare requests; a complete browser
+# fingerprint plus a Referer survives most checks.
 _HEADERS = {
     "User-Agent": (
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    ),
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;q=0.9,"
+        "image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7"
     ),
     "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Sec-Ch-Ua": '"Chromium";v="131", "Not_A Brand";v="24", "Google Chrome";v="131"',
+    "Sec-Ch-Ua-Mobile": "?0",
+    "Sec-Ch-Ua-Platform": '"Windows"',
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "same-origin",
+    "Sec-Fetch-User": "?1",
+    "Upgrade-Insecure-Requests": "1",
 }
+
+# How long to wait between retries on a 202 (anti-bot stealth-block).
+_RETRY_DELAYS_SECONDS = (3, 8, 15)
 
 
 class IMDBScrapeError(RuntimeError):
@@ -49,13 +69,43 @@ async def _fetch_html(imdb_id: str, section: str, cache_dir: Path) -> str:
         return cached
 
     url = f"{_BASE}/title/{imdb_id}/{section}/"
+    referer = f"{_BASE}/title/{imdb_id}/"
+    headers = {**_HEADERS, "Referer": referer}
     log.info("Fetching IMDB %s for %s", section, imdb_id)
-    async with httpx.AsyncClient(timeout=30.0, headers=_HEADERS, follow_redirects=True) as c:
-        r = await c.get(url)
-    if r.status_code != 200:
-        raise IMDBScrapeError(f"IMDB {section} for {imdb_id}: HTTP {r.status_code}")
-    write_text(path, r.text)
-    return r.text
+    async with httpx.AsyncClient(
+        timeout=30.0, headers=headers, follow_redirects=True
+    ) as c:
+        # Warm the cookie jar by hitting the title page first — Cloudflare's
+        # rules are friendlier once a "first-party" session is established.
+        try:
+            await c.get(referer)
+        except httpx.HTTPError as e:
+            log.debug("IMDB referer warmup failed (non-fatal): %s", e)
+
+        last_status: int | None = None
+        for attempt, delay in enumerate((0,) + _RETRY_DELAYS_SECONDS):
+            if delay:
+                log.info(
+                    "IMDB %s for %s returned %s — retrying in %ds (attempt %d/%d)",
+                    section,
+                    imdb_id,
+                    last_status,
+                    delay,
+                    attempt,
+                    len(_RETRY_DELAYS_SECONDS),
+                )
+                await asyncio.sleep(delay)
+            r = await c.get(url)
+            last_status = r.status_code
+            if r.status_code == 200 and r.text:
+                write_text(path, r.text)
+                return r.text
+            # 202 from IMDB = Cloudflare soft-block; retry. Any other non-200
+            # is unlikely to fix itself with a retry, so we bail.
+            if r.status_code != 202:
+                break
+
+    raise IMDBScrapeError(f"IMDB {section} for {imdb_id}: HTTP {last_status}")
 
 
 def _parse_items(html: str, source: str) -> list[RawSourceItem]:
