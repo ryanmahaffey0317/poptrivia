@@ -8,5 +8,9 @@ services:
     env_file:
       - .env
     volumes:
+      # poptrivia's own state (SQLite DB, generated tracks, scraper cache)
       - ./config:/config
-      - /mnt/user/media:/media:ro
+      # Mount the media root at the SAME path inside the container so the
+      # file paths Tautulli reports work as-is. Read-only — we never write
+      # to media.
+      - /mnt/user/data/media:/mnt/user/data/media:ro
