@@ -72,6 +72,46 @@ def is_tracked(
     return False
 
 
+def remove_from_tracked(path: Path, identifier: str) -> bool:
+    """Atomically remove an identifier line from the tracked-list file.
+
+    Match is case-insensitive against the line's identifier (the bit before
+    any inline `#` comment). Lines that don't contain the identifier are
+    preserved verbatim — including comments, blank lines, and the file's
+    header block.
+
+    Returns True if a line was removed, False if the identifier wasn't
+    present (no-op). Writes through a tempfile + rename for atomicity.
+    """
+    identifier = identifier.strip()
+    if not identifier:
+        raise ValueError("identifier cannot be empty")
+    if not path.exists():
+        return False
+
+    target = identifier.lower()
+    kept_lines: list[str] = []
+    removed = False
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        token = raw_line.split("#", 1)[0].strip().lower()
+        if token == target:
+            removed = True
+            continue
+        kept_lines.append(raw_line)
+
+    if not removed:
+        return False
+
+    body = "\n".join(kept_lines)
+    if body and not body.endswith("\n"):
+        body += "\n"
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(body, encoding="utf-8")
+    tmp.replace(path)
+    log.info("Removed %s from tracked list", identifier)
+    return True
+
+
 def append_to_tracked(
     path: Path,
     identifier: str,

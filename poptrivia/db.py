@@ -107,6 +107,15 @@ class Database:
             rows = await cur.fetchall()
         return [_row_to_movie(r) for r in rows]
 
+    async def get_movie_by_imdb_id(self, imdb_id: str) -> Movie | None:
+        """Find a movie row by its IMDB id. Used by Discord slash commands
+        where the user types an imdb id rather than a plex_guid."""
+        async with self.conn.execute(
+            "SELECT * FROM movies WHERE imdb_id = ? LIMIT 1", (imdb_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        return _row_to_movie(row) if row else None
+
     async def upsert_movie(
         self,
         *,
@@ -210,6 +219,18 @@ class Database:
             (plex_guid,),
         )
         await self.conn.commit()
+
+    async def clear_dismissed(self, plex_guid: str) -> bool:
+        """Clear dismissed_at so future plays can re-prompt the user.
+        Returns True if a row was actually changed."""
+        cur = await self.conn.execute(
+            "UPDATE movies SET dismissed_at=NULL, "
+            "updated_at=CURRENT_TIMESTAMP "
+            "WHERE plex_guid=? AND dismissed_at IS NOT NULL",
+            (plex_guid,),
+        )
+        await self.conn.commit()
+        return (cur.rowcount or 0) > 0
 
     # ─── prep_jobs ──────────────────────────────────────────────────
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -7,7 +8,7 @@ import pytest
 
 from poptrivia.config import Settings
 from poptrivia.db import Database
-from poptrivia.discord_bot import GeneratePromptView
+from poptrivia.discord_bot import GeneratePromptView, PoptriviaBot
 from poptrivia.models import MovieStatus
 
 
@@ -159,3 +160,248 @@ async def test_dismiss_button_unapproved_user_rejected(db_and_settings) -> None:
     assert movie is not None
     assert movie.dismissed_at is None
     interaction.response.send_message.assert_awaited_once()
+
+
+# ─── slash command handler tests ─────────────────────────────────────────
+
+
+def _make_bot(db_and_settings) -> PoptriviaBot:
+    """Construct a bot for handler-level tests. We don't connect to Discord;
+    we just exercise the _handle_* methods directly with a mocked interaction."""
+    db, settings = db_and_settings
+    return PoptriviaBot(settings=settings, db=db)
+
+
+async def test_untrack_removes_existing_entry(db_and_settings) -> None:
+    db, settings = db_and_settings
+    settings.tracked_list_path.write_text(
+        "tt0081505   # The Shining\ntt1478338   # Bridesmaids\n",
+        encoding="utf-8",
+    )
+    bot = _make_bot(db_and_settings)
+    interaction = _make_interaction(123456)
+
+    await bot._handle_untrack_command(interaction, "tt0081505")
+
+    content = settings.tracked_list_path.read_text(encoding="utf-8")
+    assert "tt0081505" not in content
+    assert "tt1478338" in content
+    interaction.response.send_message.assert_awaited_once()
+    args, _kwargs = interaction.response.send_message.call_args
+    assert "Removed" in args[0] and "tt0081505" in args[0]
+
+
+async def test_untrack_not_present_returns_ephemeral(db_and_settings) -> None:
+    db, settings = db_and_settings
+    settings.tracked_list_path.write_text("tt1478338\n", encoding="utf-8")
+    bot = _make_bot(db_and_settings)
+    interaction = _make_interaction(123456)
+
+    await bot._handle_untrack_command(interaction, "tt0000000")
+
+    interaction.response.send_message.assert_awaited_once()
+    _args, kwargs = interaction.response.send_message.call_args
+    assert kwargs.get("ephemeral") is True
+
+
+async def test_untrack_unauthorized_rejected(db_and_settings) -> None:
+    db, settings = db_and_settings
+    settings.tracked_list_path.write_text("tt0081505\n", encoding="utf-8")
+    bot = _make_bot(db_and_settings)
+    interaction = _make_interaction(999999)  # not approved
+
+    await bot._handle_untrack_command(interaction, "tt0081505")
+
+    # File untouched
+    assert "tt0081505" in settings.tracked_list_path.read_text(encoding="utf-8")
+    args, kwargs = interaction.response.send_message.call_args
+    assert "Not authorized" in args[0]
+    assert kwargs.get("ephemeral") is True
+
+
+async def test_list_command_empty_tracked_file(db_and_settings) -> None:
+    db, settings = db_and_settings
+    # Intentionally no tracked.txt
+    bot = _make_bot(db_and_settings)
+    interaction = _make_interaction(123456)
+
+    await bot._handle_list_command(interaction)
+
+    interaction.response.send_message.assert_awaited_once()
+    args, _kwargs = interaction.response.send_message.call_args
+    assert "empty" in args[0].lower()
+
+
+async def test_list_command_renders_status_badges(db_and_settings) -> None:
+    db, settings = db_and_settings
+    settings.tracked_list_path.write_text(
+        "tt0081505   # The Shining\ntt1478338   # Bridesmaids\n",
+        encoding="utf-8",
+    )
+    await db.upsert_movie(
+        plex_guid="plex://movie/shining",
+        title="The Shining",
+        imdb_id="tt0081505",
+        status=MovieStatus.READY,
+    )
+    await db.upsert_movie(
+        plex_guid="plex://movie/bridesmaids",
+        title="Bridesmaids",
+        imdb_id="tt1478338",
+        status=MovieStatus.FAILED,
+    )
+    bot = _make_bot(db_and_settings)
+    interaction = _make_interaction(123456)
+
+    await bot._handle_list_command(interaction)
+
+    interaction.response.send_message.assert_awaited_once()
+    _args, kwargs = interaction.response.send_message.call_args
+    embed = kwargs.get("embed")
+    assert embed is not None
+    body = embed.description
+    assert "tt0081505" in body and "ready" in body
+    assert "tt1478338" in body and "failed" in body
+
+
+async def test_show_command_returns_top_cards(db_and_settings, tmp_path: Path) -> None:
+    db, settings = db_and_settings
+    track_path = tmp_path / "track.json"
+    track_path.write_text(
+        json.dumps({
+            "plex_guid": "plex://movie/abc",
+            "title": "The Shining",
+            "year": 1980,
+            "generated_at": "2026-05-01T00:00:00+00:00",
+            "model": "qwen3:32b",
+            "cards": [
+                {
+                    "id": "card_001",
+                    "timestamp_ms": 60_000,
+                    "text": "Kubrick demanded 127 takes.",
+                    "category": "production",
+                    "interest_level": 5,
+                    "source_fact_id": "f001",
+                    "anchor_evidence": "x",
+                },
+                {
+                    "id": "card_002",
+                    "timestamp_ms": 120_000,
+                    "text": "Stephen King disliked the adaptation.",
+                    "category": "cultural_impact",
+                    "interest_level": 4,
+                    "source_fact_id": "f002",
+                    "anchor_evidence": "x",
+                },
+            ],
+        }),
+        encoding="utf-8",
+    )
+    await db.upsert_movie(
+        plex_guid="plex://movie/abc",
+        title="The Shining",
+        year=1980,
+        imdb_id="tt0081505",
+        status=MovieStatus.READY,
+        track_path=str(track_path),
+    )
+    bot = _make_bot(db_and_settings)
+    interaction = _make_interaction(123456)
+
+    await bot._handle_show_command(interaction, "tt0081505")
+
+    interaction.response.send_message.assert_awaited_once()
+    _args, kwargs = interaction.response.send_message.call_args
+    embed = kwargs.get("embed")
+    assert embed is not None
+    body = embed.description
+    assert "Kubrick demanded 127 takes" in body
+    assert "Stephen King" in body
+
+
+async def test_show_command_movie_not_found(db_and_settings) -> None:
+    db, settings = db_and_settings
+    bot = _make_bot(db_and_settings)
+    interaction = _make_interaction(123456)
+
+    await bot._handle_show_command(interaction, "tt9999999")
+
+    args, kwargs = interaction.response.send_message.call_args
+    assert "No movie in the DB" in args[0]
+    assert kwargs.get("ephemeral") is True
+
+
+async def test_regenerate_command_enqueues_job(db_and_settings) -> None:
+    db, settings = db_and_settings
+    await db.upsert_movie(
+        plex_guid="plex://movie/abc",
+        title="The Shining",
+        imdb_id="tt0081505",
+        status=MovieStatus.READY,
+    )
+    bot = _make_bot(db_and_settings)
+    interaction = _make_interaction(123456)
+
+    await bot._handle_regenerate_command(interaction, "tt0081505")
+
+    movie = await db.get_movie("plex://movie/abc")
+    assert movie is not None and movie.status == MovieStatus.QUEUED
+    job = await db.next_pending_job()
+    assert job is not None and job.plex_guid == "plex://movie/abc"
+
+
+async def test_regenerate_command_rejects_if_job_already_active(
+    db_and_settings,
+) -> None:
+    db, settings = db_and_settings
+    await db.upsert_movie(
+        plex_guid="plex://movie/abc",
+        title="X",
+        imdb_id="tt0081505",
+        status=MovieStatus.READY,
+    )
+    await db.enqueue_job("plex://movie/abc")  # already pending
+
+    bot = _make_bot(db_and_settings)
+    interaction = _make_interaction(123456)
+
+    await bot._handle_regenerate_command(interaction, "tt0081505")
+
+    args, kwargs = interaction.response.send_message.call_args
+    assert "already pending or running" in args[0]
+    assert kwargs.get("ephemeral") is True
+
+
+async def test_dismiss_clear_command_resets_flag(db_and_settings) -> None:
+    db, settings = db_and_settings
+    await db.upsert_movie(
+        plex_guid="plex://movie/abc",
+        title="X",
+        imdb_id="tt0081505",
+    )
+    await db.set_dismissed("plex://movie/abc")
+    bot = _make_bot(db_and_settings)
+    interaction = _make_interaction(123456)
+
+    await bot._handle_dismiss_clear_command(interaction, "tt0081505")
+
+    movie = await db.get_movie("plex://movie/abc")
+    assert movie is not None
+    assert movie.dismissed_at is None
+
+
+async def test_dismiss_clear_command_no_op_when_not_dismissed(db_and_settings) -> None:
+    db, settings = db_and_settings
+    await db.upsert_movie(
+        plex_guid="plex://movie/abc",
+        title="X",
+        imdb_id="tt0081505",
+    )
+    bot = _make_bot(db_and_settings)
+    interaction = _make_interaction(123456)
+
+    await bot._handle_dismiss_clear_command(interaction, "tt0081505")
+
+    args, kwargs = interaction.response.send_message.call_args
+    assert "wasn't dismissed" in args[0]
+    assert kwargs.get("ephemeral") is True

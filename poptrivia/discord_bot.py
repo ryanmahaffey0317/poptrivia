@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import discord
 from discord.ext import commands
 
 from poptrivia.models import Movie, MovieStatus
-from poptrivia.tracked import append_to_tracked
+from poptrivia.session_monitor import load_track
+from poptrivia.tracked import append_to_tracked, read_tracked, remove_from_tracked
 
 if TYPE_CHECKING:
     from poptrivia.config import Settings
@@ -62,15 +64,63 @@ class PoptriviaBot(commands.Bot):
             log.warning("Slash command sync failed: %s", e)
 
     async def setup_hook(self) -> None:
-        # Register the /track slash command.
+        # Register all slash commands. Keep the closures thin — they just
+        # forward to handler methods that hold the real logic, so tests
+        # can call the handlers directly.
+
         @self.tree.command(
             name="track",
             description="Add a movie to the trivia tracked list by IMDB id.",
         )
-        async def track_cmd(  # noqa: D401
-            interaction: discord.Interaction, imdb_id: str, comment: str | None = None
+        async def track_cmd(
+            interaction: discord.Interaction,
+            imdb_id: str,
+            comment: str | None = None,
         ) -> None:
             await self._handle_track_command(interaction, imdb_id, comment)
+
+        @self.tree.command(
+            name="untrack",
+            description="Remove a movie from the trivia tracked list.",
+        )
+        async def untrack_cmd(
+            interaction: discord.Interaction, imdb_id: str
+        ) -> None:
+            await self._handle_untrack_command(interaction, imdb_id)
+
+        @self.tree.command(
+            name="list",
+            description="Show all movies currently on the trivia tracked list.",
+        )
+        async def list_cmd(interaction: discord.Interaction) -> None:
+            await self._handle_list_command(interaction)
+
+        @self.tree.command(
+            name="show",
+            description="Show the top trivia cards for a prepped movie.",
+        )
+        async def show_cmd(
+            interaction: discord.Interaction, imdb_id: str
+        ) -> None:
+            await self._handle_show_command(interaction, imdb_id)
+
+        @self.tree.command(
+            name="regenerate",
+            description="Force a fresh prep run for a movie (overwrites the track).",
+        )
+        async def regenerate_cmd(
+            interaction: discord.Interaction, imdb_id: str
+        ) -> None:
+            await self._handle_regenerate_command(interaction, imdb_id)
+
+        @self.tree.command(
+            name="dismiss-clear",
+            description="Allow prompts again for a movie that was previously dismissed.",
+        )
+        async def dismiss_clear_cmd(
+            interaction: discord.Interaction, imdb_id: str
+        ) -> None:
+            await self._handle_dismiss_clear_command(interaction, imdb_id)
 
     async def get_prompt_channel(self) -> discord.abc.Messageable | None:
         """Lazy-fetch the configured channel."""
@@ -165,6 +215,200 @@ class PoptriviaBot(commands.Bot):
             "movie has been seen before).",
             ephemeral=False,
         )
+
+    # ─── /untrack ──────────────────────────────────────────────────────
+
+    async def _handle_untrack_command(
+        self, interaction: discord.Interaction, imdb_id: str
+    ) -> None:
+        if not await self._require_approved(interaction):
+            return
+        imdb_id = imdb_id.strip()
+        try:
+            removed = remove_from_tracked(self.settings.tracked_list_path, imdb_id)
+        except Exception as e:
+            log.exception("Failed to remove from tracked list: %s", e)
+            await interaction.response.send_message(
+                f"Couldn't update the tracked list: `{e}`", ephemeral=True
+            )
+            return
+        if removed:
+            await interaction.response.send_message(
+                f"✅ Removed `{imdb_id}` from the tracked list. "
+                "The existing track file (if any) stays on disk — cards just "
+                "won't fire on play.",
+            )
+        else:
+            await interaction.response.send_message(
+                f"`{imdb_id}` wasn't on the tracked list.", ephemeral=True
+            )
+
+    # ─── /list ────────────────────────────────────────────────────────
+
+    _STATUS_BADGE = {
+        "ready": "✅ ready",
+        "queued": "🔧 queued",
+        "generating": "⚙️  generating",
+        "failed": "❌ failed",
+        "not_started": "📋 not prepped",
+    }
+
+    async def _handle_list_command(self, interaction: discord.Interaction) -> None:
+        # Read-only — anyone in the channel can run /list.
+        tracked = read_tracked(self.settings.tracked_list_path)
+        if not tracked:
+            await interaction.response.send_message(
+                "Tracked list is empty. Add movies with `/track <imdb_id>` "
+                "or by clicking ✨ Generate on a playback prompt."
+            )
+            return
+
+        movies = await self.db.list_movies()
+        by_imdb = {m.imdb_id.lower(): m for m in movies if m.imdb_id}
+        by_guid = {m.plex_guid.lower(): m for m in movies}
+
+        lines: list[str] = []
+        for entry in sorted(tracked):
+            movie = by_imdb.get(entry) or by_guid.get(entry)
+            if movie is None:
+                lines.append(f"`{entry}` — 📋 not prepped (no metadata yet)")
+                continue
+            badge = self._STATUS_BADGE.get(movie.status.value, movie.status.value)
+            year_str = f" ({movie.year})" if movie.year else ""
+            lines.append(f"`{entry}` — {badge} — **{movie.title}**{year_str}")
+
+        body = "\n".join(lines)
+        # Embed description has a 4096-char limit. Truncate gracefully.
+        if len(body) > 4000:
+            body = body[:4000] + "\n…(truncated)"
+        embed = discord.Embed(
+            title=f"Tracked movies ({len(tracked)})",
+            description=body,
+            color=discord.Color.blurple(),
+        )
+        await interaction.response.send_message(embed=embed)
+
+    # ─── /show ────────────────────────────────────────────────────────
+
+    async def _handle_show_command(
+        self, interaction: discord.Interaction, imdb_id: str
+    ) -> None:
+        imdb_id = imdb_id.strip()
+        movie = await self.db.get_movie_by_imdb_id(imdb_id)
+        if movie is None:
+            await interaction.response.send_message(
+                f"No movie in the DB with imdb id `{imdb_id}`.", ephemeral=True
+            )
+            return
+        if not movie.track_path:
+            await interaction.response.send_message(
+                f"`{imdb_id}` has no track yet (status: `{movie.status.value}`). "
+                "Try `/regenerate` if you think it should be ready.",
+                ephemeral=True,
+            )
+            return
+        try:
+            cards = load_track(Path(movie.track_path))
+        except Exception as e:
+            log.exception("Failed to load track for %s: %s", imdb_id, e)
+            await interaction.response.send_message(
+                f"Couldn't read track file: `{e}`", ephemeral=True
+            )
+            return
+
+        # Show the first ~10 cards in timestamp order so the user can
+        # vibe-check chronologically without scrolling forever.
+        preview = sorted(cards, key=lambda c: c.timestamp_ms)[:10]
+        body_lines: list[str] = []
+        for c in preview:
+            ts = c.timestamp_ms // 1000
+            mins, secs = divmod(ts, 60)
+            hrs, mins = divmod(mins, 60)
+            ts_str = f"{hrs}:{mins:02d}:{secs:02d}" if hrs else f"{mins:02d}:{secs:02d}"
+            stars = "★" * c.interest_level
+            body_lines.append(f"`{ts_str}` {stars} **{c.category}** — {c.text}")
+
+        body = "\n\n".join(body_lines)
+        if len(body) > 4000:
+            body = body[:4000] + "\n…(truncated)"
+
+        year_str = f" ({movie.year})" if movie.year else ""
+        embed = discord.Embed(
+            title=f"{movie.title}{year_str} — first {len(preview)} of {len(cards)} cards",
+            description=body,
+            color=discord.Color.blurple(),
+        )
+        await interaction.response.send_message(embed=embed)
+
+    # ─── /regenerate ──────────────────────────────────────────────────
+
+    async def _handle_regenerate_command(
+        self, interaction: discord.Interaction, imdb_id: str
+    ) -> None:
+        if not await self._require_approved(interaction):
+            return
+        imdb_id = imdb_id.strip()
+        movie = await self.db.get_movie_by_imdb_id(imdb_id)
+        if movie is None:
+            await interaction.response.send_message(
+                f"No movie in the DB with imdb id `{imdb_id}`. "
+                "Play it once or add it via `/track` first.",
+                ephemeral=True,
+            )
+            return
+        if await self.db.has_active_job(movie.plex_guid):
+            await interaction.response.send_message(
+                f"A prep job is already pending or running for `{imdb_id}`. "
+                "Wait for it to finish before regenerating.",
+                ephemeral=True,
+            )
+            return
+
+        await self.db.set_movie_status(movie.plex_guid, MovieStatus.QUEUED)
+        await self.db.enqueue_job(movie.plex_guid)
+        year_str = f" ({movie.year})" if movie.year else ""
+        await interaction.response.send_message(
+            f"🔧 Queued a fresh prep for **{movie.title}**{year_str}. "
+            "The existing track will be overwritten when prep completes."
+        )
+
+    # ─── /dismiss-clear ───────────────────────────────────────────────
+
+    async def _handle_dismiss_clear_command(
+        self, interaction: discord.Interaction, imdb_id: str
+    ) -> None:
+        if not await self._require_approved(interaction):
+            return
+        imdb_id = imdb_id.strip()
+        movie = await self.db.get_movie_by_imdb_id(imdb_id)
+        if movie is None:
+            await interaction.response.send_message(
+                f"No movie in the DB with imdb id `{imdb_id}`.", ephemeral=True
+            )
+            return
+        cleared = await self.db.clear_dismissed(movie.plex_guid)
+        year_str = f" ({movie.year})" if movie.year else ""
+        if cleared:
+            await interaction.response.send_message(
+                f"✅ Cleared dismissed flag on **{movie.title}**{year_str}. "
+                "Future plays can prompt again."
+            )
+        else:
+            await interaction.response.send_message(
+                f"**{movie.title}**{year_str} wasn't dismissed.", ephemeral=True
+            )
+
+    # ─── shared helpers ───────────────────────────────────────────────
+
+    async def _require_approved(self, interaction: discord.Interaction) -> bool:
+        """Reject non-approved users with an ephemeral message.
+        Returns True if the user passed the check."""
+        if interaction.user.id in self.settings.discord_approved_users:
+            return True
+        await interaction.response.send_message(
+            "Not authorized to modify the trivia list.", ephemeral=True
+        )
+        return False
 
 
 class GeneratePromptView(discord.ui.View):

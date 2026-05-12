@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 
 from poptrivia.models import RawFactExtracted, TriviaCard
 from poptrivia.prep.chapters import Chapter, MovieMetadata
@@ -18,6 +19,15 @@ _MIN_CARD_SPACING_MS = 90_000
 # Skip the very start and end of the runtime when placing facts — credits,
 # opening logos, etc. 5% on each side trims ~6 minutes off a 2-hour film.
 _RUNTIME_EDGE_TRIM = 0.05
+
+# Chapter titles that almost certainly mark credits / no-trivia regions.
+# Matches "Opening Credits", "End Titles", "Main Title Sequence", etc.
+# Case-insensitive; ignores trailing punctuation / numbering.
+_CREDITS_TITLE_RE = re.compile(
+    r"^\s*(opening|end|closing|main|final|start)?\s*"
+    r"(title\s*sequence|titles?|credits?|logos?)\b",
+    re.IGNORECASE,
+)
 
 
 def place_facts(
@@ -44,9 +54,25 @@ def place_facts(
 
     facts = facts[:max_cards]
 
-    if metadata.chapters:
-        timestamps = _place_in_chapters(len(facts), metadata.chapters)
-        scheme = f"{len(metadata.chapters)} chapters"
+    placeable_chapters = (
+        _exclude_credits_chapters(metadata.chapters, metadata.duration_ms)
+        if metadata.chapters
+        else ()
+    )
+    if metadata.chapters and not placeable_chapters:
+        log.info(
+            "All %d chapters look like credits / edge-trim — falling back "
+            "to even spacing",
+            len(metadata.chapters),
+        )
+
+    if placeable_chapters:
+        skipped = len(metadata.chapters) - len(placeable_chapters)
+        timestamps = _place_in_chapters(len(facts), placeable_chapters)
+        scheme = (
+            f"{len(placeable_chapters)} chapters"
+            + (f" (skipped {skipped} credits)" if skipped else "")
+        )
     else:
         timestamps = _place_evenly(len(facts), metadata.duration_ms)
         scheme = "even spacing"
@@ -83,6 +109,44 @@ def place_facts(
         scheme,
     )
     return cards
+
+
+# ─── credits-chapter filter ──────────────────────────────────────────────
+
+
+def _exclude_credits_chapters(
+    chapters: tuple[Chapter, ...], duration_ms: int
+) -> tuple[Chapter, ...]:
+    """Drop chapters that almost certainly cover credits / logos / no-trivia.
+
+    Two rules, each independent:
+      1. Title-based: matches _CREDITS_TITLE_RE (e.g. "Opening Credits",
+         "End Titles", "Main Titles").
+      2. Position-based: chapter is entirely inside the first or last
+         _RUNTIME_EDGE_TRIM fraction of the runtime. Catches credit
+         chapters that don't follow predictable naming.
+    """
+    edge_lo = int(duration_ms * _RUNTIME_EDGE_TRIM)
+    edge_hi = int(duration_ms * (1.0 - _RUNTIME_EDGE_TRIM))
+
+    out: list[Chapter] = []
+    for c in chapters:
+        if _CREDITS_TITLE_RE.match(c.title):
+            log.info("Excluding credits-titled chapter %r", c.title)
+            continue
+        if c.end_ms <= edge_lo or c.start_ms >= edge_hi:
+            log.info(
+                "Excluding edge-position chapter %r (%dms-%dms outside "
+                "5%%-95%% useful range %dms-%dms)",
+                c.title,
+                c.start_ms,
+                c.end_ms,
+                edge_lo,
+                edge_hi,
+            )
+            continue
+        out.append(c)
+    return tuple(out)
 
 
 # ─── chapter-based placement ──────────────────────────────────────────────
