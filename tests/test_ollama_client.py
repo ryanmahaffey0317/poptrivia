@@ -15,14 +15,16 @@ from poptrivia.prep.llm.client import (
 def _make_client(handler) -> OllamaClient:
     transport = httpx.MockTransport(handler)
     http = httpx.AsyncClient(transport=transport)
-    return OllamaClient("http://ollama:11434", "qwen2.5:32b", client=http)
+    return OllamaClient("http://ollama:11434", "qwen3:32b", client=http)
 
 
 async def test_generate_string_no_schema() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
-        assert body["model"] == "qwen2.5:32b"
+        assert body["model"] == "qwen3:32b"
         assert body["prompt"] == "hello"
+        # No schema given → no format param sent
+        assert "format" not in body
         return httpx.Response(200, json={"response": "hi there"})
 
     c = _make_client(handler)
@@ -33,12 +35,15 @@ async def test_generate_string_no_schema() -> None:
     assert out == "hi there"
 
 
-async def test_generate_with_schema_returns_parsed_json() -> None:
+async def test_generate_with_schema_uses_json_format_mode() -> None:
+    """When a schema is provided we request format='json' from Ollama
+    (NOT format=<schema>, which qwen3.6 doesn't honor). The schema is
+    enforced downstream via pydantic, not by Ollama."""
     schema = {"type": "object", "properties": {"x": {"type": "integer"}}}
 
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
-        assert body["format"] == schema
+        assert body["format"] == "json"  # NOT a schema dict
         return httpx.Response(200, json={"response": '{"x": 42}'})
 
     c = _make_client(handler)
@@ -90,69 +95,17 @@ async def test_health_probe_success_and_failure() -> None:
         await c.aclose()
 
 
-async def test_schema_empty_response_falls_back_to_json_mode() -> None:
-    """qwen3.6:27b returns empty on format=<schema>. The client should
-    automatically retry with format='json' and parse the result."""
-    schema = {"type": "object", "properties": {"x": {"type": "integer"}}}
-    calls: list[dict] = []
+async def test_generate_no_schema_does_not_send_format() -> None:
+    """Plain text completions don't constrain the response format."""
+    captured: list[dict] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        body = json.loads(request.content)
-        calls.append(body)
-        # First call: schema mode → return empty (simulating qwen3.6's bug)
-        # Second call: json mode → return real JSON
-        if isinstance(body.get("format"), dict):
-            return httpx.Response(200, json={"response": ""})
-        if body.get("format") == "json":
-            return httpx.Response(200, json={"response": '{"x": 42}'})
-        return httpx.Response(500, text="unexpected format")
+        captured.append(json.loads(request.content))
+        return httpx.Response(200, json={"response": "ok"})
 
     c = _make_client(handler)
     try:
-        out = await c.generate("foo", schema=schema)
+        await c.generate("just text", schema=None)
     finally:
         await c.aclose()
-
-    assert out == {"x": 42}
-    # Verify both attempts actually happened in the right order.
-    assert len(calls) == 2
-    assert isinstance(calls[0]["format"], dict)  # first attempt: schema
-    assert calls[1]["format"] == "json"          # fallback: json mode
-
-
-async def test_schema_mode_success_does_not_retry() -> None:
-    """When schema mode works, we should NOT issue a second request."""
-    schema = {"type": "object", "properties": {"x": {"type": "integer"}}}
-    calls = {"n": 0}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        calls["n"] += 1
-        return httpx.Response(200, json={"response": '{"x": 7}'})
-
-    c = _make_client(handler)
-    try:
-        out = await c.generate("foo", schema=schema)
-    finally:
-        await c.aclose()
-
-    assert out == {"x": 7}
-    assert calls["n"] == 1  # exactly one round-trip — no fallback fired
-
-
-async def test_no_schema_does_not_trigger_fallback() -> None:
-    """When the caller didn't pass a schema, an empty response is a valid
-    answer; we should NOT retry as json mode."""
-    calls = {"n": 0}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        calls["n"] += 1
-        return httpx.Response(200, json={"response": ""})
-
-    c = _make_client(handler)
-    try:
-        out = await c.generate("foo")  # no schema
-    finally:
-        await c.aclose()
-
-    assert out == ""
-    assert calls["n"] == 1
+    assert "format" not in captured[0]
