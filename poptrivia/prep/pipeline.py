@@ -6,13 +6,13 @@ from pathlib import Path
 from poptrivia.config import Settings
 from poptrivia.db import Database
 from poptrivia.models import Movie, MovieStatus, RawSourceItem
+from poptrivia.prep.chapters import ChapterProbeError, probe_metadata
 from poptrivia.prep.llm.client import OllamaClient
 from poptrivia.prep.llm.stage1_extract import extract_facts
-from poptrivia.prep.llm.stage2_align import align_facts, write_track_file
+from poptrivia.prep.placement import place_facts
 from poptrivia.prep.sources import imdb as imdb_source
 from poptrivia.prep.sources import tmdb as tmdb_source
 from poptrivia.prep.sources import wikipedia as wiki_source
-from poptrivia.prep.subtitles import SubtitleEntry, extract as extract_subs
 
 log = logging.getLogger("poptrivia.prep.pipeline")
 
@@ -30,19 +30,23 @@ async def prepare_movie(
 ) -> Path:
     """Run the full prep pipeline for a single movie.
 
-    Returns the path to the written track file. Raises PipelineError on
-    fatal issues. OllamaUnavailable bubbles up to the caller so the queue
-    worker can back off.
+    Steps:
+      1. Scrape source material (IMDB + Wikipedia + TMDB) or read manual files.
+      2. Probe the movie file for duration + chapter list (ffprobe metadata
+         only — no stream decoding).
+      3. Stage 1 LLM: extract facts from source material.
+      4. Place facts on the timeline using chapters (or even-spacing).
+      5. Write the JSON track file.
 
-    If `manual_sources` are supplied, each file's text is appended as an
-    `imdb_trivia` source item and the IMDB *network* scrape is skipped
-    entirely — the user is telling us "use this paste instead." Wikipedia
-    and TMDB still run normally.
+    No subtitle extraction. The previous Stage 2 LLM call is replaced with
+    algorithmic placement — chapters when present, even spacing otherwise.
+    Trade-off: cards no longer fire 5 s before a specific line, but the
+    pipeline works reliably on every movie regardless of subtitle quality.
     """
     log.info("Prep starting for %s (%s)", movie.title, movie.plex_guid)
     await db.set_movie_status(movie.plex_guid, MovieStatus.GENERATING)
 
-    # 1. Scrape source material -----------------------------------------
+    # 1. Source material -----------------------------------------------
     source_items = await _gather_sources(
         movie=movie, settings=settings, manual_sources=manual_sources or []
     )
@@ -50,22 +54,15 @@ async def prepare_movie(
         raise PipelineError("No source material found from IMDB or Wikipedia")
     log.info("Sources: %d items", len(source_items))
 
-    # 2. Subtitles ------------------------------------------------------
+    # 2. Movie metadata (duration + chapters) ---------------------------
     if not movie.file_path:
-        raise PipelineError("movie.file_path is empty — cannot extract subtitles")
-    subs = await extract_subs(
-        Path(movie.file_path),
-        plex_guid=movie.plex_guid,
-        plex_url=settings.plex_url,
-        plex_token=settings.plex_token,
-        whisper_url=settings.whisper_url,
-        whisper_model=settings.whisper_model,
-        whisper_timeout=settings.whisper_timeout,
-    )
-    if not subs:
-        raise PipelineError("Subtitle extraction returned 0 entries")
+        raise PipelineError("movie.file_path is empty — cannot probe metadata")
+    try:
+        metadata = await probe_metadata(Path(movie.file_path))
+    except ChapterProbeError as e:
+        raise PipelineError(f"Could not read movie metadata: {e}") from e
 
-    # 3. LLM stages -----------------------------------------------------
+    # 3. Stage 1 LLM ---------------------------------------------------
     llm = OllamaClient(
         settings.ollama_url, settings.ollama_model, timeout=settings.ollama_timeout
     )
@@ -78,25 +75,24 @@ async def prepare_movie(
             target_count=settings.target_cards_per_movie,
             num_ctx=settings.ollama_num_ctx,
         )
-        if not facts:
-            raise PipelineError("Stage 1 produced 0 facts")
-
-        cards = await align_facts(
-            movie_title=movie.title,
-            movie_year=movie.year,
-            movie_duration_ms=_estimate_duration_ms(subs),
-            facts=facts,
-            subtitles=subs,
-            llm=llm,
-            max_cards=settings.max_cards_per_movie,
-            num_ctx=settings.ollama_num_ctx,
-        )
-        if not cards:
-            raise PipelineError("Stage 2 produced 0 placed cards")
     finally:
         await llm.aclose()
 
-    # 4. Persist --------------------------------------------------------
+    if not facts:
+        raise PipelineError("Stage 1 produced 0 facts")
+
+    # 4. Place facts on the timeline -----------------------------------
+    cards = place_facts(
+        facts=facts,
+        metadata=metadata,
+        max_cards=settings.max_cards_per_movie,
+    )
+    if not cards:
+        raise PipelineError("Placement produced 0 cards")
+
+    # 5. Persist --------------------------------------------------------
+    from poptrivia.prep.llm.stage2_align import write_track_file  # leftover utility
+
     path = write_track_file(
         tracks_dir=settings.tracks_dir,
         plex_guid=movie.plex_guid,
@@ -188,11 +184,6 @@ async def _gather_sources(
 
 
 def _tmdb_to_text(meta: dict) -> str:
-    """Render the bits of TMDB metadata that are actually useful as fact source.
-
-    Cast top-billing and crew (director, DP, composer, editor) — the rest is
-    largely duplicate of what's already in Wikipedia/IMDB.
-    """
     lines: list[str] = []
     title = meta.get("title")
     year = (meta.get("release_date") or "")[:4]
@@ -231,9 +222,3 @@ def _tmdb_to_text(meta: dict) -> str:
         lines.append(f"{job}: {', '.join(names)}")
 
     return "\n".join(lines)
-
-
-def _estimate_duration_ms(subs: list[SubtitleEntry]) -> int | None:
-    if not subs:
-        return None
-    return subs[-1].end_ms
