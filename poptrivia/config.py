@@ -45,11 +45,20 @@ class Settings(BaseSettings):
     discord_webhook_url: str
     discord_system_webhook_url: str = ""
 
-    # Discord bot (interactive opt-in for untracked plays). Optional —
+    # Discord bot (interactive opt-in + channel-routed posting). Optional —
     # leave DISCORD_BOT_TOKEN blank to disable the bot entirely; the
-    # curated-list behavior still works.
+    # webhook-based posting in DISCORD_WEBHOOK_URL / DISCORD_SYSTEM_WEBHOOK_URL
+    # still works as a fallback.
     discord_bot_token: str = ""
+    # Channel where bot prompts ("Generate trivia?") post. Also the default
+    # fallback target if the more specific channel IDs below aren't set.
     discord_bot_channel_id: int = 0
+    # Where live trivia cards fire during playback. If unset and bot is
+    # enabled, falls back to discord_bot_channel_id.
+    discord_cards_channel_id: int = 0
+    # Where system notifications (track ready, prep failed) post. If unset
+    # and bot is enabled, falls back to discord_bot_channel_id.
+    discord_system_channel_id: int = 0
     discord_approved_users: Annotated[set[int], NoDecode] = Field(default_factory=set)
     discord_prompt_enabled: bool = True
     discord_prompt_delay_seconds: int = 300

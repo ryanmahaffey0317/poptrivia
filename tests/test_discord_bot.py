@@ -8,7 +8,7 @@ import pytest
 
 from poptrivia.config import Settings
 from poptrivia.db import Database
-from poptrivia.discord_bot import GeneratePromptView, PoptriviaBot
+from poptrivia.discord_bot import BotDiscordSender, GeneratePromptView, PoptriviaBot
 from poptrivia.models import MovieStatus
 
 
@@ -388,6 +388,114 @@ async def test_dismiss_clear_command_resets_flag(db_and_settings) -> None:
     movie = await db.get_movie("plex://movie/abc")
     assert movie is not None
     assert movie.dismissed_at is None
+
+
+# ─── BotDiscordSender channel routing ─────────────────────────────────────
+
+
+async def test_bot_sender_uses_cards_channel_for_cards(db_and_settings) -> None:
+    """post_card routes to discord_cards_channel_id."""
+    db, settings = db_and_settings
+    settings.discord_bot_channel_id = 100
+    settings.discord_cards_channel_id = 200
+    settings.discord_system_channel_id = 300
+
+    bot = _make_bot(db_and_settings)
+    sender = BotDiscordSender(bot=bot, settings=settings)
+
+    # Mock channel
+    import discord as _discord
+    channel = MagicMock(spec=_discord.TextChannel)
+    channel.send = AsyncMock()
+
+    async def fake_fetch(cid):
+        # Should be asked for the cards channel
+        assert cid == 200
+        return channel
+
+    bot.get_channel = MagicMock(return_value=None)
+    bot.fetch_channel = AsyncMock(side_effect=fake_fetch)
+
+    card = MagicMock()
+    card.text = "test card"
+    card.category = "production"
+
+    movie = MagicMock()
+    movie.title = "X"
+    movie.year = 2000
+
+    await sender.post_card(card, movie)
+
+    channel.send.assert_awaited_once()
+    _args, kwargs = channel.send.call_args
+    assert "embed" in kwargs
+
+
+async def test_bot_sender_uses_system_channel_for_system(db_and_settings) -> None:
+    """post_system routes to discord_system_channel_id."""
+    db, settings = db_and_settings
+    settings.discord_bot_channel_id = 100
+    settings.discord_cards_channel_id = 200
+    settings.discord_system_channel_id = 300
+
+    bot = _make_bot(db_and_settings)
+    sender = BotDiscordSender(bot=bot, settings=settings)
+
+    import discord as _discord
+    channel = MagicMock(spec=_discord.TextChannel)
+    channel.send = AsyncMock()
+
+    async def fake_fetch(cid):
+        assert cid == 300  # system channel
+        return channel
+
+    bot.get_channel = MagicMock(return_value=None)
+    bot.fetch_channel = AsyncMock(side_effect=fake_fetch)
+
+    await sender.post_system("hello")
+
+    channel.send.assert_awaited_once()
+    _args, kwargs = channel.send.call_args
+    assert kwargs.get("content") == "hello"
+
+
+async def test_bot_sender_falls_back_to_bot_channel_when_specific_unset(
+    db_and_settings,
+) -> None:
+    """If cards/system channel IDs aren't set, fall back to bot_channel_id."""
+    db, settings = db_and_settings
+    settings.discord_bot_channel_id = 100
+    settings.discord_cards_channel_id = 0   # not set
+    settings.discord_system_channel_id = 0  # not set
+
+    bot = _make_bot(db_and_settings)
+    sender = BotDiscordSender(bot=bot, settings=settings)
+
+    import discord as _discord
+    channel = MagicMock(spec=_discord.TextChannel)
+    channel.send = AsyncMock()
+
+    seen_channels: list[int] = []
+
+    async def fake_fetch(cid):
+        seen_channels.append(cid)
+        return channel
+
+    bot.get_channel = MagicMock(return_value=None)
+    bot.fetch_channel = AsyncMock(side_effect=fake_fetch)
+
+    await sender.post_system("system message")
+
+    card = MagicMock()
+    card.text = "x"
+    card.category = "production"
+    movie = MagicMock()
+    movie.title = "X"
+    movie.year = 2000
+    await sender.post_card(card, movie)
+
+    # Both calls fell back to the bot channel.
+    assert seen_channels == [100, 100]
 
 
 async def test_dismiss_clear_command_no_op_when_not_dismissed(db_and_settings) -> None:

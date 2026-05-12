@@ -68,10 +68,14 @@ def place_facts(
 
     if placeable_chapters:
         skipped = len(metadata.chapters) - len(placeable_chapters)
-        timestamps = _place_in_chapters(len(facts), placeable_chapters)
+        placed_pairs, matched_count = _place_in_chapters(facts, placeable_chapters)
+        timestamps = [ts for ts, _f in placed_pairs]
+        facts = [f for _ts, f in placed_pairs]
         scheme = (
             f"{len(placeable_chapters)} chapters"
-            + (f" (skipped {skipped} credits)" if skipped else "")
+            + (f", {matched_count}/{len(facts)} anchor-matched"
+               if matched_count else "")
+            + (f", skipped {skipped} credits" if skipped else "")
         )
     else:
         timestamps = _place_evenly(len(facts), metadata.duration_ms)
@@ -152,23 +156,103 @@ def _exclude_credits_chapters(
 # ─── chapter-based placement ──────────────────────────────────────────────
 
 
-def _place_in_chapters(n_facts: int, chapters: tuple[Chapter, ...]) -> list[int]:
-    """Spread n_facts across chapters proportionally to chapter duration.
+def _place_in_chapters(
+    facts: list,
+    chapters: tuple[Chapter, ...],
+) -> tuple[list[tuple[int, object]], int]:
+    """Assign each fact to one chapter and choose a timestamp within it.
 
-    Within each chapter, evenly distribute the allocated facts and place
-    each at chapter_start + k * (chapter_duration / (allocation + 1)).
-    That's "evenly spaced inside the chapter, not touching its edges."
+    Returns (placed_pairs, anchor_match_count).
+    placed_pairs is a list of (timestamp_ms, fact) tuples sorted by timestamp.
+
+    Assignment is anchor-aware: if any of a fact's anchors appears (case-
+    insensitive substring) in a chapter title, route the fact there. Common
+    anchors that match multiple chapters go to the least-loaded one. Facts
+    with no anchor-title match (or no anchors at all) round-robin-fill the
+    least-loaded chapters globally — same distribution behavior we had
+    before, just preceded by the anchor-matching pass.
+
+    Within each chapter we then space the assigned facts at
+    chapter_start + k * (chapter_duration / (allocation + 1)).
     """
-    allocations = _allocate_largest_remainder(n_facts, chapters)
-    timestamps: list[int] = []
-    for chapter, alloc in zip(chapters, allocations):
-        if alloc <= 0 or chapter.duration_ms <= 0:
+    if not chapters or not facts:
+        return [], 0
+
+    assignment, matched_count = _assign_by_anchor(facts, chapters)
+    placed: list[tuple[int, object]] = []
+    for chapter, ch_facts in zip(chapters, assignment):
+        if not ch_facts or chapter.duration_ms <= 0:
             continue
-        for k in range(1, alloc + 1):
-            offset = chapter.duration_ms * k // (alloc + 1)
-            timestamps.append(chapter.start_ms + offset)
-    timestamps.sort()
-    return timestamps
+        n = len(ch_facts)
+        for k, fact in enumerate(ch_facts, start=1):
+            offset = chapter.duration_ms * k // (n + 1)
+            placed.append((chapter.start_ms + offset, fact))
+    placed.sort(key=lambda p: p[0])
+    return placed, matched_count
+
+
+def _assign_by_anchor(
+    facts: list,
+    chapters: tuple[Chapter, ...],
+) -> tuple[list[list], int]:
+    """For each fact, pick a chapter.
+
+    1. If any anchor word (>=3 chars) appears in a chapter title, that
+       chapter is a candidate. Among matching chapters, pick the least-
+       loaded one (ties → lowest index). Counts as an anchor match.
+    2. Otherwise (no anchors, or no anchor matches any title), the fact
+       is queued for round-robin assignment to the globally-emptiest
+       chapter. Sorted by specificity desc so high-quality facts spread
+       first.
+
+    Returns (assignment_per_chapter, count_of_anchor_matched_facts).
+    """
+    n_ch = len(chapters)
+    assignment: list[list] = [[] for _ in range(n_ch)]
+    title_lower = [c.title.lower() for c in chapters]
+
+    def _least_loaded(candidates: list[int]) -> int:
+        return min(candidates, key=lambda i: (len(assignment[i]), i))
+
+    leftover: list = []
+    anchor_matched = 0
+
+    for fact in facts:
+        anchors = [
+            a.lower().strip()
+            for a in getattr(fact, "anchors", []) or []
+            if isinstance(a, str) and len(a.strip()) >= 3
+        ]
+        if not anchors:
+            leftover.append(fact)
+            continue
+        matching = [
+            i for i, t in enumerate(title_lower)
+            if any(anchor in t for anchor in anchors)
+        ]
+        if not matching:
+            leftover.append(fact)
+            continue
+        assignment[_least_loaded(matching)].append(fact)
+        anchor_matched += 1
+        log.info(
+            "Anchor-matched fact to chapter %r via anchors %s",
+            chapters[matching[0]].title,
+            anchors,
+        )
+
+    # Round-robin leftover facts to least-loaded chapter overall, sorted
+    # by specificity so the strongest facts spread first.
+    leftover.sort(
+        key=lambda f: -_SPECIFICITY_TO_INTEREST.get(
+            getattr(f, "specificity", "medium"), 0
+        )
+    )
+    all_idxs = list(range(n_ch))
+    for fact in leftover:
+        assignment[_least_loaded(all_idxs)].append(fact)
+
+    return assignment, anchor_matched
 
 
 def _allocate_largest_remainder(

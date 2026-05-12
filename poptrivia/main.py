@@ -34,36 +34,53 @@ async def lifespan(app: FastAPI):
 
     db = Database(settings.db_path)
     await db.connect()
-    discord = DiscordClient(settings.discord_webhook_url, settings.system_webhook_url)
-    worker = PrepWorker(settings=settings, db=db, discord=discord)
-    poller = TrackedPoller(settings=settings, db=db)
-    worker.start()
-    poller.start()
 
     # Optional: Discord bot for interactive opt-in prompts on untracked
-    # monitored plays. Only spun up when DISCORD_BOT_TOKEN is configured.
+    # monitored plays AND for posting cards / system notifications via
+    # channel IDs (instead of webhooks). When DISCORD_BOT_TOKEN is set,
+    # the bot becomes the unified Discord output path. Webhooks remain
+    # as the fallback when the bot isn't configured.
     bot = None
     bot_task: asyncio.Task | None = None
     prompt_timers = PromptTimerRegistry()
+    discord: object  # WebhookDiscordSender | BotDiscordSender — duck-typed
     if settings.discord_bot_token:
         try:
-            from poptrivia.discord_bot import PoptriviaBot, start_bot
+            from poptrivia.discord_bot import (
+                BotDiscordSender,
+                PoptriviaBot,
+                start_bot,
+            )
 
             bot = PoptriviaBot(settings=settings, db=db)
             bot_task = await start_bot(bot, settings.discord_bot_token)
+            discord = BotDiscordSender(bot=bot, settings=settings)
             log.info(
-                "Discord bot starting (channel=%s, approved_users=%s, "
-                "prompt_delay=%ds)",
+                "Discord bot active (prompts=%s, cards=%s, system=%s, "
+                "approved_users=%s, prompt_delay=%ds)",
                 settings.discord_bot_channel_id,
+                settings.discord_cards_channel_id or settings.discord_bot_channel_id,
+                settings.discord_system_channel_id or settings.discord_bot_channel_id,
                 sorted(settings.discord_approved_users),
                 settings.discord_prompt_delay_seconds,
             )
         except Exception as e:
-            log.exception("Discord bot startup failed: %s", e)
+            log.exception("Discord bot startup failed; falling back to webhooks: %s", e)
             bot = None
             bot_task = None
+            discord = DiscordClient(
+                settings.discord_webhook_url, settings.system_webhook_url
+            )
     else:
-        log.info("DISCORD_BOT_TOKEN not set — interactive prompts disabled")
+        discord = DiscordClient(
+            settings.discord_webhook_url, settings.system_webhook_url
+        )
+        log.info("DISCORD_BOT_TOKEN not set — using webhook-based posting")
+
+    worker = PrepWorker(settings=settings, db=db, discord=discord)
+    poller = TrackedPoller(settings=settings, db=db)
+    worker.start()
+    poller.start()
 
     app.state.db = db
     app.state.settings = settings

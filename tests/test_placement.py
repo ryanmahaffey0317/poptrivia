@@ -69,11 +69,14 @@ def test_place_in_chapters_facts_land_inside_chapters() -> None:
         Chapter(0, 600_000, "A"),
         Chapter(600_000, 1_200_000, "B"),
     )
-    ts = _place_in_chapters(n_facts=4, chapters=chapters)
-    assert len(ts) == 4
-    assert all(0 <= t < 1_200_000 for t in ts)
-    # In sorted order
-    assert ts == sorted(ts)
+    facts = [_fact(f"f{i}") for i in range(4)]
+    pairs, matched = _place_in_chapters(facts, chapters)
+    assert len(pairs) == 4
+    timestamps = [ts for ts, _f in pairs]
+    assert all(0 <= t < 1_200_000 for t in timestamps)
+    assert timestamps == sorted(timestamps)
+    # No anchors on these facts → matched count is 0
+    assert matched == 0
 
 
 def test_place_in_chapters_zero_duration_chapter_skipped() -> None:
@@ -81,8 +84,104 @@ def test_place_in_chapters_zero_duration_chapter_skipped() -> None:
         Chapter(0, 0, "Empty"),  # degenerate; nothing should land here
         Chapter(0, 600_000, "B"),
     )
-    ts = _place_in_chapters(n_facts=2, chapters=chapters)
-    assert all(t > 0 for t in ts)
+    facts = [_fact(f"f{i}") for i in range(2)]
+    pairs, _matched = _place_in_chapters(facts, chapters)
+    assert all(ts > 0 for ts, _f in pairs)
+
+
+# ─── anchor → chapter-title matching ─────────────────────────────────────
+
+
+def _afact(text: str, anchors: list[str], specificity: str = "high"):
+    return RawFactExtracted(
+        fact=text,
+        source="imdb_trivia",
+        specificity=specificity,  # type: ignore[arg-type]
+        anchors=anchors,
+        category="production",
+    )
+
+
+def test_anchor_matched_fact_routes_to_matching_chapter() -> None:
+    """A fact whose anchor appears in a chapter title should be placed
+    inside that chapter, not somewhere arbitrary."""
+    chapters = (
+        Chapter(0, 600_000, "The Setup"),
+        Chapter(600_000, 1_200_000, "Wedding Reception"),
+        Chapter(1_200_000, 1_800_000, "The Aftermath"),
+    )
+    facts = [_afact("Wilson Phillips played the wedding", ["wedding"])]
+    pairs, matched = _place_in_chapters(facts, chapters)
+    assert matched == 1
+    ts, _fact = pairs[0]
+    # Must be inside the Wedding chapter
+    assert 600_000 <= ts < 1_200_000
+
+
+def test_anchor_matched_load_balances_across_matching_chapters() -> None:
+    """If anchor matches multiple chapters, facts spread across them
+    rather than piling into the first one."""
+    chapters = (
+        Chapter(0, 600_000, "Annie at the Coffee Shop"),
+        Chapter(600_000, 1_200_000, "Annie at the Bakery"),
+        Chapter(1_200_000, 1_800_000, "Annie at the Wedding"),
+    )
+    facts = [_afact(f"fact_{i}", ["Annie"]) for i in range(6)]
+    pairs, matched = _place_in_chapters(facts, chapters)
+    assert matched == 6
+    # 2 per chapter — load-balanced.
+    counts_per_chapter = [
+        sum(1 for ts, _f in pairs if c.start_ms <= ts < c.end_ms)
+        for c in chapters
+    ]
+    assert counts_per_chapter == [2, 2, 2]
+
+
+def test_unmatched_anchor_falls_through_to_round_robin() -> None:
+    """A fact with anchors but no matching chapter title should still
+    be placed somewhere, via the round-robin leftover path."""
+    chapters = (
+        Chapter(0, 600_000, "Chapter A"),
+        Chapter(600_000, 1_200_000, "Chapter B"),
+    )
+    facts = [_afact("x", ["something not in any chapter title"])]
+    pairs, matched = _place_in_chapters(facts, chapters)
+    assert len(pairs) == 1     # placed
+    assert matched == 0        # not anchor-matched
+
+
+def test_mixed_anchored_and_anchorless_facts() -> None:
+    """Anchored facts route via title match; anchorless / unmatched facts
+    spread across remaining capacity."""
+    chapters = (
+        Chapter(0, 600_000, "Opening"),
+        Chapter(600_000, 1_200_000, "Wedding"),
+        Chapter(1_200_000, 1_800_000, "Finale"),
+    )
+    facts = [
+        _afact("Wedding venue fact", ["wedding"]),        # → chapter 1
+        _afact("Production fact A", []),                  # → leftover
+        _afact("Production fact B", []),                  # → leftover
+        _afact("Production fact C", []),                  # → leftover
+    ]
+    pairs, matched = _place_in_chapters(facts, chapters)
+    assert len(pairs) == 4
+    assert matched == 1
+    # The wedding fact should be inside the wedding chapter.
+    wedding_pair = next(p for p in pairs if p[1].fact == "Wedding venue fact")
+    assert 600_000 <= wedding_pair[0] < 1_200_000
+
+
+def test_short_anchor_ignored() -> None:
+    """Anchors shorter than 3 chars don't trigger matching (avoids
+    false positives on common words like 'is', 'on', 'to')."""
+    chapters = (
+        Chapter(0, 600_000, "Is on To"),  # title with short words
+        Chapter(600_000, 1_200_000, "Real Scene"),
+    )
+    facts = [_afact("x", ["is", "on"])]
+    _pairs, matched = _place_in_chapters(facts, chapters)
+    assert matched == 0  # Short anchors don't count
 
 
 # ─── min-spacing ──────────────────────────────────────────────────────────

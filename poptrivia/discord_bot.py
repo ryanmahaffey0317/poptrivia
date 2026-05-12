@@ -8,7 +8,12 @@ from typing import TYPE_CHECKING
 import discord
 from discord.ext import commands
 
-from poptrivia.models import Movie, MovieStatus
+from poptrivia.discord_client import (
+    CATEGORY_COLORS,
+    color_for,
+    pretty_category,
+)
+from poptrivia.models import Movie, MovieStatus, TriviaCard
 from poptrivia.session_monitor import load_track
 from poptrivia.tracked import append_to_tracked, read_tracked, remove_from_tracked
 
@@ -532,3 +537,118 @@ async def start_bot(bot: PoptriviaBot, token: str) -> asyncio.Task[None]:
     Returns the task so the caller can cancel/await on shutdown.
     """
     return asyncio.create_task(bot.start(token), name="discord-bot")
+
+
+class BotDiscordSender:
+    """Drop-in replacement for DiscordClient that posts via the bot.
+
+    Same method signatures as poptrivia.discord_client.DiscordClient so
+    SessionMonitor / PrepWorker don't need to know which one they have.
+
+    Posts to channel IDs from settings:
+      - cards (post_card, post_track_active, post_session_summary)
+        → DISCORD_CARDS_CHANNEL_ID (falls back to DISCORD_BOT_CHANNEL_ID)
+      - system notifications (post_system)
+        → DISCORD_SYSTEM_CHANNEL_ID (falls back to DISCORD_BOT_CHANNEL_ID)
+
+    Why this and not webhooks? Channel routing is configured by ID rather
+    than by webhook URL — easier to manage when you want different message
+    types in different channels, and unifies all Discord I/O on the bot's
+    auth (one token, no extra webhook URLs to rotate).
+    """
+
+    def __init__(self, *, bot: "PoptriviaBot", settings: "Settings"):
+        self._bot = bot
+        self._settings = settings
+
+    async def aclose(self) -> None:
+        # The bot's lifecycle is managed elsewhere (lifespan). Nothing for
+        # the sender to clean up.
+        pass
+
+    # ─── public API (matches DiscordClient) ─────────────────────────
+
+    async def post_card(self, card: TriviaCard, movie: Movie) -> None:
+        year = f" ({movie.year})" if movie.year else ""
+        footer_text = f"{pretty_category(card.category)} · {movie.title}{year}"
+        embed = discord.Embed(
+            description=f"💭 {card.text}",
+            color=color_for(card.category),
+        )
+        embed.set_footer(text=footer_text)
+        await self._send_embed(self._cards_channel_id(), embed=embed)
+
+    async def post_track_active(self, movie: Movie, card_count: int) -> None:
+        year = f" ({movie.year})" if movie.year else ""
+        text = (
+            f"🎬 **{movie.title}**{year} — Trivia track active · "
+            f"{card_count} card{'s' if card_count != 1 else ''}"
+        )
+        await self._send_text(self._cards_channel_id(), content=text)
+
+    async def post_session_summary(
+        self, movie: Movie, fired: int, total: int
+    ) -> None:
+        year = f" ({movie.year})" if movie.year else ""
+        text = (
+            f"🏁 **{movie.title}**{year} — session ended · "
+            f"{fired} of {total} cards fired"
+        )
+        await self._send_text(self._cards_channel_id(), content=text)
+
+    async def post_system(self, text: str) -> None:
+        await self._send_text(self._system_channel_id(), content=text)
+
+    # ─── internals ──────────────────────────────────────────────────
+
+    def _cards_channel_id(self) -> int:
+        return (
+            self._settings.discord_cards_channel_id
+            or self._settings.discord_bot_channel_id
+        )
+
+    def _system_channel_id(self) -> int:
+        return (
+            self._settings.discord_system_channel_id
+            or self._settings.discord_bot_channel_id
+        )
+
+    async def _send_text(self, channel_id: int, *, content: str) -> None:
+        channel = await self._resolve_channel(channel_id)
+        if channel is None:
+            return
+        try:
+            await channel.send(content=content)
+        except discord.HTTPException as e:
+            log.warning("Bot failed to send text to channel %s: %s", channel_id, e)
+
+    async def _send_embed(
+        self, channel_id: int, *, embed: discord.Embed
+    ) -> None:
+        channel = await self._resolve_channel(channel_id)
+        if channel is None:
+            return
+        try:
+            await channel.send(embed=embed)
+        except discord.HTTPException as e:
+            log.warning("Bot failed to send embed to channel %s: %s", channel_id, e)
+
+    async def _resolve_channel(
+        self, channel_id: int
+    ) -> "discord.abc.Messageable | None":
+        if not channel_id:
+            log.warning(
+                "No Discord channel configured for this message type; dropping"
+            )
+            return None
+        channel = self._bot.get_channel(channel_id)
+        if channel is None:
+            try:
+                channel = await self._bot.fetch_channel(channel_id)
+            except discord.HTTPException as e:
+                log.warning("Could not fetch channel %s: %s", channel_id, e)
+                return None
+        if not isinstance(channel, discord.abc.Messageable):
+            log.warning("Channel %s is not messageable: %r", channel_id, channel)
+            return None
+        return channel
