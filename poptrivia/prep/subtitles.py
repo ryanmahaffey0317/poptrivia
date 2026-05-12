@@ -157,6 +157,17 @@ async def _try_plex_subtitles(
                 srt_text = await client.download_subtitle(stream.stream_id)
             except PlexError as e:
                 log.warning("Plex stream %d download failed: %s", stream.stream_id, e)
+                # HTTP 501 from /library/streams/{id} means Plex won't serve
+                # this kind of subtitle (almost always: it's an embedded
+                # stream, not an externally-downloaded one). All other
+                # streams for this movie will hit the same response — bail
+                # out instead of spamming logs with 28 identical errors.
+                if "501" in str(e):
+                    log.info(
+                        "Plex returned 501 — its API doesn't serve embedded "
+                        "subs. Aborting Plex fallback for this file."
+                    )
+                    return None
                 continue
             entries = _parse_srt_text(srt_text)
             if entries:
