@@ -28,6 +28,15 @@ class OllamaClient:
       - a parsed dict if schema is given (JSON mode + validation)
       - the raw string otherwise
 
+    When `schema` is provided, we first try Ollama's new schema-constrained
+    mode (`format=<schema>`). Some models (notably qwen3.6:27b on current
+    Ollama builds) return empty responses for this — they don't honor
+    the schema parameter. On an empty response we automatically retry
+    with `format="json"`, the older "just be valid JSON" mode that has
+    broader model support. The final pydantic validation downstream still
+    enforces our schema after the fact, so the only thing we lose is
+    Ollama-side enforcement.
+
     On connection refused / DNS failure / timeout: raises OllamaUnavailable.
     """
 
@@ -69,6 +78,52 @@ class OllamaClient:
         temperature: float = 0.3,
         num_ctx: int | None = None,
     ) -> dict[str, Any] | str:
+        # First attempt: full structured-output mode if a schema was given.
+        response_text = await self._post_once(
+            prompt=prompt,
+            system=system,
+            temperature=temperature,
+            num_ctx=num_ctx,
+            format_value=schema,
+        )
+
+        # qwen3.6:27b + a few other models return empty strings for
+        # format=<schema>. If we asked for a schema and got nothing back,
+        # retry with the broader format="json" mode.
+        if schema is not None and not response_text.strip():
+            log.info(
+                "Schema-mode response was empty; retrying with format='json' "
+                "(model=%s)",
+                self.model,
+            )
+            response_text = await self._post_once(
+                prompt=prompt,
+                system=system,
+                temperature=temperature,
+                num_ctx=num_ctx,
+                format_value="json",
+            )
+
+        if schema is None:
+            return response_text
+
+        try:
+            return json.loads(response_text)
+        except json.JSONDecodeError as e:
+            raise OllamaError(
+                f"Ollama returned invalid JSON despite schema: {response_text[:500]}"
+            ) from e
+
+    async def _post_once(
+        self,
+        *,
+        prompt: str,
+        system: str | None,
+        temperature: float,
+        num_ctx: int | None,
+        format_value: dict[str, Any] | str | None,
+    ) -> str:
+        """One round-trip to /api/generate. Returns the raw 'response' text."""
         body: dict[str, Any] = {
             "model": self.model,
             "prompt": prompt,
@@ -79,9 +134,8 @@ class OllamaClient:
             body["system"] = system
         if num_ctx is not None:
             body["options"]["num_ctx"] = num_ctx
-        if schema is not None:
-            # Ollama accepts a JSON schema directly here.
-            body["format"] = schema
+        if format_value is not None:
+            body["format"] = format_value
 
         try:
             r = await self._client.post(
@@ -103,13 +157,4 @@ class OllamaClient:
         response_text = payload.get("response")
         if not isinstance(response_text, str):
             raise OllamaError(f"Ollama response missing 'response' field: {payload!r}")
-
-        if schema is None:
-            return response_text
-
-        try:
-            return json.loads(response_text)
-        except json.JSONDecodeError as e:
-            raise OllamaError(
-                f"Ollama returned invalid JSON despite schema: {response_text[:500]}"
-            ) from e
+        return response_text

@@ -88,3 +88,71 @@ async def test_health_probe_success_and_failure() -> None:
         assert await c.health() is False
     finally:
         await c.aclose()
+
+
+async def test_schema_empty_response_falls_back_to_json_mode() -> None:
+    """qwen3.6:27b returns empty on format=<schema>. The client should
+    automatically retry with format='json' and parse the result."""
+    schema = {"type": "object", "properties": {"x": {"type": "integer"}}}
+    calls: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        calls.append(body)
+        # First call: schema mode → return empty (simulating qwen3.6's bug)
+        # Second call: json mode → return real JSON
+        if isinstance(body.get("format"), dict):
+            return httpx.Response(200, json={"response": ""})
+        if body.get("format") == "json":
+            return httpx.Response(200, json={"response": '{"x": 42}'})
+        return httpx.Response(500, text="unexpected format")
+
+    c = _make_client(handler)
+    try:
+        out = await c.generate("foo", schema=schema)
+    finally:
+        await c.aclose()
+
+    assert out == {"x": 42}
+    # Verify both attempts actually happened in the right order.
+    assert len(calls) == 2
+    assert isinstance(calls[0]["format"], dict)  # first attempt: schema
+    assert calls[1]["format"] == "json"          # fallback: json mode
+
+
+async def test_schema_mode_success_does_not_retry() -> None:
+    """When schema mode works, we should NOT issue a second request."""
+    schema = {"type": "object", "properties": {"x": {"type": "integer"}}}
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(200, json={"response": '{"x": 7}'})
+
+    c = _make_client(handler)
+    try:
+        out = await c.generate("foo", schema=schema)
+    finally:
+        await c.aclose()
+
+    assert out == {"x": 7}
+    assert calls["n"] == 1  # exactly one round-trip — no fallback fired
+
+
+async def test_no_schema_does_not_trigger_fallback() -> None:
+    """When the caller didn't pass a schema, an empty response is a valid
+    answer; we should NOT retry as json mode."""
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(200, json={"response": ""})
+
+    c = _make_client(handler)
+    try:
+        out = await c.generate("foo")  # no schema
+    finally:
+        await c.aclose()
+
+    assert out == ""
+    assert calls["n"] == 1
