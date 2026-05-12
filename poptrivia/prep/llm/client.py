@@ -84,17 +84,24 @@ class OllamaClient:
             "prompt": prompt,
             "stream": False,
             "options": {"temperature": temperature},
+            # Disable thinking-mode for reasoning models like qwen3.6:27b.
+            # With format='json' constraining output, thinking tokens get
+            # suppressed and the model produces empty responses. We don't
+            # need deliberation for fact extraction or placement — we want
+            # direct JSON output. The parameter is silently ignored by
+            # non-thinking models (e.g. qwen3:32b), so this is safe to
+            # always send.
+            "think": False,
         }
         if system is not None:
             body["system"] = system
         if num_ctx is not None:
             body["options"]["num_ctx"] = num_ctx
-        # `schema` is intentionally NOT forwarded as Ollama's constrained-
-        # decoding `format` parameter — qwen3.6:27b (and likely other
-        # newer models) silently return empty when that mode is used.
-        # We ask Ollama for `format="json"` (broad model support, just
-        # "produce valid JSON") and validate the actual shape downstream
-        # via pydantic. Effective outcome is the same.
+        # `schema` is accepted on the API for caller-side docs but isn't
+        # forwarded as Ollama's constrained-decoding format — qwen3.6:27b
+        # and similar newer models return empty bodies in that mode.
+        # format='json' has universal model support; pydantic validation
+        # downstream enforces our actual schema shape.
         if schema is not None:
             body["format"] = "json"
 

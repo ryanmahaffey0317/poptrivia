@@ -25,6 +25,9 @@ async def test_generate_string_no_schema() -> None:
         assert body["prompt"] == "hello"
         # No schema given → no format param sent
         assert "format" not in body
+        # Thinking explicitly disabled (qwen3.6:27b would otherwise return
+        # empty when format=json is set; harmless on non-thinking models).
+        assert body["think"] is False
         return httpx.Response(200, json={"response": "hi there"})
 
     c = _make_client(handler)
@@ -44,6 +47,7 @@ async def test_generate_with_schema_uses_json_format_mode() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
         assert body["format"] == "json"  # NOT a schema dict
+        assert body["think"] is False    # thinking suppressed for JSON outputs
         return httpx.Response(200, json={"response": '{"x": 42}'})
 
     c = _make_client(handler)
