@@ -61,7 +61,7 @@ class Settings(BaseSettings):
     discord_system_channel_id: int = 0
     discord_approved_users: Annotated[set[int], NoDecode] = Field(default_factory=set)
     discord_prompt_enabled: bool = True
-    discord_prompt_delay_seconds: int = 300
+    discord_prompt_delay_seconds: int = 30
 
     # Source material
     tmdb_api_key: str = ""

@@ -35,6 +35,141 @@ def load_track(path: Path) -> list[TriviaCard]:
     return [TriviaCard.model_validate(c) for c in data.get("cards", [])]
 
 
+class MonitorRegistry:
+    """Single owner of active SessionMonitor tasks.
+
+    Two entry points:
+      - `start_for_session(session_key, movie, track_path)`: idempotent
+        per session_key. Called by the webhook on play events.
+      - `auto_start_for_movie(movie, track_path)`: query Tautulli for
+        any currently-active sessions playing this movie and start a
+        monitor for each. Called by the prep worker on success so cards
+        begin firing the moment a track becomes ready, without needing
+        the user to stop + restart playback.
+    """
+
+    def __init__(self, *, settings: Settings, discord: "_Discord"):
+        self._settings = settings
+        self._discord = discord
+        self._monitors: dict[str, SessionMonitor] = {}
+
+    @property
+    def active(self) -> dict[str, SessionMonitor]:
+        return self._monitors
+
+    async def stop_all(self) -> None:
+        for mon in list(self._monitors.values()):
+            try:
+                await mon.stop()
+            except Exception as e:
+                log.warning("MonitorRegistry: stop_all on %s raised: %s",
+                            mon.session_key, e)
+        self._monitors.clear()
+
+    async def start_for_session(
+        self, session_key: str, movie: Movie, track_path: str
+    ) -> bool:
+        """Start a monitor for the given Tautulli session. Returns True
+        if a new monitor was started, False if one already exists for
+        this session_key or the track failed to load."""
+        if session_key in self._monitors:
+            log.info(
+                "MonitorRegistry: already running for session_key=%s",
+                session_key,
+            )
+            return False
+        try:
+            track = load_track(Path(track_path))
+        except Exception as e:
+            log.warning(
+                "MonitorRegistry: failed to load track %s: %s", track_path, e
+            )
+            return False
+
+        tautulli = TautulliClient(
+            self._settings.tautulli_url, self._settings.tautulli_api_key
+        )
+        monitor = SessionMonitor(
+            session_key=session_key,
+            movie=movie,
+            track=track,
+            tautulli=tautulli,
+            discord=self._discord,
+            settings=self._settings,
+        )
+        task = monitor.start()
+
+        def _cleanup_callback(_t: asyncio.Task) -> None:
+            asyncio.create_task(self._cleanup(session_key, tautulli))
+
+        task.add_done_callback(_cleanup_callback)
+        self._monitors[session_key] = monitor
+        log.info(
+            "MonitorRegistry: started session=%s movie=%r cards=%d",
+            session_key,
+            movie.title,
+            len(track),
+        )
+        return True
+
+    async def _cleanup(
+        self, session_key: str, tautulli: TautulliClient
+    ) -> None:
+        self._monitors.pop(session_key, None)
+        await tautulli.aclose()
+
+    async def auto_start_for_movie(
+        self, movie: Movie, track_path: str
+    ) -> int:
+        """Query Tautulli for active sessions playing this movie and
+        start a SessionMonitor for each one we don't already have.
+
+        Returns the number of new monitors started.
+
+        Called from the prep worker on success: when a track first
+        becomes available WHILE the user is watching, this lets cards
+        start firing immediately rather than requiring a play/replay.
+        """
+        tautulli = TautulliClient(
+            self._settings.tautulli_url, self._settings.tautulli_api_key
+        )
+        try:
+            sessions = await tautulli.get_activity()
+        except TautulliError as e:
+            log.warning(
+                "MonitorRegistry: Tautulli poll for auto-start failed: %s", e
+            )
+            return 0
+        finally:
+            await tautulli.aclose()
+
+        matching = [
+            s
+            for s in sessions
+            if s.plex_guid == movie.plex_guid and s.state in ("playing", "paused")
+        ]
+        if not matching:
+            log.info(
+                "MonitorRegistry: no active session playing %s; not auto-starting",
+                movie.plex_guid,
+            )
+            return 0
+
+        started = 0
+        for session in matching:
+            if await self.start_for_session(
+                session.session_key, movie, track_path
+            ):
+                started += 1
+        if started:
+            log.info(
+                "MonitorRegistry: auto-started %d monitor(s) for newly-ready %r",
+                started,
+                movie.title,
+            )
+        return started
+
+
 class SessionMonitor:
     """Drives one active playback session: polls Tautulli, fires due cards.
 

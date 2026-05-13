@@ -10,6 +10,7 @@ from poptrivia.db import Database
 from poptrivia.discord_client import DiscordClient
 from poptrivia.prep.llm.client import OllamaUnavailable
 from poptrivia.prep.pipeline import PipelineError, prepare_movie
+from poptrivia.session_monitor import MonitorRegistry
 
 log = logging.getLogger("poptrivia.prep.queue")
 
@@ -26,10 +27,22 @@ class PrepWorker:
     job is marked FAILED and we notify Discord.
     """
 
-    def __init__(self, *, settings: Settings, db: Database, discord: DiscordClient):
+    def __init__(
+        self,
+        *,
+        settings: Settings,
+        db: Database,
+        discord: DiscordClient,
+        monitor_registry: MonitorRegistry | None = None,
+    ):
         self.settings = settings
         self.db = db
         self.discord = discord
+        # Optional — when present, on prep success we ask the registry to
+        # check whether the movie is currently playing in Tautulli and
+        # start a SessionMonitor if so. Lets cards begin firing mid-watch
+        # the moment a track becomes ready, without requiring a play/replay.
+        self.monitor_registry = monitor_registry
         self._task: asyncio.Task[None] | None = None
         self._stopped = asyncio.Event()
 
@@ -158,6 +171,24 @@ class PrepWorker:
             assert updated is not None
         except Exception as discord_err:
             log.warning("Could not post success notification: %s", discord_err)
+
+        # If the user is currently watching this movie, start a
+        # SessionMonitor right now so cards start firing immediately.
+        # Without this, the user would have to stop+restart the movie
+        # to trigger a fresh Tautulli play event.
+        if self.monitor_registry is not None:
+            try:
+                started = await self.monitor_registry.auto_start_for_movie(
+                    movie, str(track_path)
+                )
+                if started:
+                    log.info(
+                        "Auto-started %d SessionMonitor(s) for newly-ready %r",
+                        started,
+                        movie.title,
+                    )
+            except Exception as e:
+                log.warning("Monitor auto-start raised (non-fatal): %s", e)
         return True
 
 

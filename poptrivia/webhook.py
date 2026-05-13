@@ -1,17 +1,13 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
-from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Request
 from pydantic import ValidationError
 
 from poptrivia.models import Movie, MovieStatus, TautulliEvent
-from poptrivia.session_monitor import SessionMonitor, load_track
-from poptrivia.tautulli_client import TautulliClient
 from poptrivia.tracked import is_tracked, read_tracked
 
 log = logging.getLogger("poptrivia.webhook")
@@ -118,11 +114,8 @@ async def tautulli_webhook(request: Request) -> dict[str, Any]:
                 movie.plex_guid,
             )
             return {"ok": False, "reason": "ready but no track_path"}
-        await _start_monitor_if_needed(
-            request=request,
-            session_key=event.session_key,
-            movie=movie,
-            track_path=movie.track_path,
+        await request.app.state.monitor_registry.start_for_session(
+            event.session_key, movie, movie.track_path
         )
         return {"ok": True, "action": "monitor_started", "status": movie.status.value}
 
@@ -150,51 +143,6 @@ async def tautulli_webhook(request: Request) -> dict[str, Any]:
         movie.status.value,
     )
     return {"ok": True, "action": "in_progress", "status": movie.status.value}
-
-
-async def _start_monitor_if_needed(
-    *,
-    request: Request,
-    session_key: str,
-    movie: Movie,
-    track_path: str,
-) -> None:
-    app = request.app
-    monitors: dict[str, SessionMonitor] = app.state.session_monitors
-    if session_key in monitors:
-        log.info(
-            "SessionMonitor already running for session_key=%s — leaving alone",
-            session_key,
-        )
-        return
-
-    track = load_track(Path(track_path))
-    settings = app.state.settings
-    discord = app.state.discord
-    tautulli = TautulliClient(settings.tautulli_url, settings.tautulli_api_key)
-
-    monitor = SessionMonitor(
-        session_key=session_key,
-        movie=movie,
-        track=track,
-        tautulli=tautulli,
-        discord=discord,
-        settings=settings,
-    )
-    task = monitor.start()
-
-    async def _cleanup() -> None:
-        monitors.pop(session_key, None)
-        await tautulli.aclose()
-
-    task.add_done_callback(lambda _t: asyncio.create_task(_cleanup()))
-    monitors[session_key] = monitor
-    log.info(
-        "SessionMonitor started | session_key=%s movie=%r cards=%d",
-        session_key,
-        movie.title,
-        len(track),
-    )
 
 
 async def _maybe_schedule_prompt(

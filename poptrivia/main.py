@@ -11,6 +11,7 @@ from poptrivia.db import Database
 from poptrivia.discord_client import DiscordClient
 from poptrivia.prep.queue import PrepWorker
 from poptrivia.prompt_timer import PromptTimerRegistry
+from poptrivia.session_monitor import MonitorRegistry
 from poptrivia.tracked import ensure_template
 from poptrivia.tracked_poll import TrackedPoller
 from poptrivia.util.logging import configure_logging
@@ -77,7 +78,18 @@ async def lifespan(app: FastAPI):
         )
         log.info("DISCORD_BOT_TOKEN not set — using webhook-based posting")
 
-    worker = PrepWorker(settings=settings, db=db, discord=discord)
+    # Shared registry of active SessionMonitor tasks. Used by:
+    #   - webhook: starts a monitor on monitored-user playback of a ready movie
+    #   - worker: auto-starts a monitor on prep success if the user is
+    #             currently watching the movie (so cards begin firing mid-watch)
+    monitor_registry = MonitorRegistry(settings=settings, discord=discord)
+
+    worker = PrepWorker(
+        settings=settings,
+        db=db,
+        discord=discord,
+        monitor_registry=monitor_registry,
+    )
     poller = TrackedPoller(settings=settings, db=db)
     worker.start()
     poller.start()
@@ -89,7 +101,9 @@ async def lifespan(app: FastAPI):
     app.state.poller = poller
     app.state.bot = bot
     app.state.prompt_timers = prompt_timers
-    app.state.session_monitors = {}
+    app.state.monitor_registry = monitor_registry
+    # Back-compat alias for callers that referenced app.state.session_monitors.
+    app.state.session_monitors = monitor_registry.active
 
     try:
         yield
